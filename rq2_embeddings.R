@@ -1,27 +1,54 @@
 ## ==================================================================
-## RQ: Can the integration of semantic embeddings and psycholinguistic
-##     features improve sarcasm detection in user-generated content?
+## RQ2: Can the integration of semantic embeddings and psycholinguistic
+##      features improve sarcasm detection in user-generated content?
 ##
-## Design:
-##   Model 1  -> semantic embeddings ONLY                (harrier-oss-v1-270m)
-##   Model 2  -> semantic embeddings + psycholinguistic features
-##               (punctuation, capitalization, intra-comment
-##               incongruity, parent-reply incongruity)
-##   Both models use the identical classifier / CV setup / train-test
-##   split, so any performance gap is attributable to the added
-##   psycholinguistic features rather than to modeling choices.
+## DESIGN -- read this before changing anything below.
 ##
-## Structure of this script:
-##   1. Setup (packages)
-##   2. Load data
-##   3. Sampling & cleaning (compute-feasible subset)
-##   4. Psycholinguistic feature engineering
-##   5. Semantic embeddings (harrier-oss-v1-270m)
-##   6. Assemble Model 1 / Model 2 datasets + train/test split
-##   7. Train classifiers (elastic-net logistic regression, 10-fold CV)
-##   8. Evaluate (Accuracy, Precision, Recall, F1, AUC)
-##   9. Compare Model 1 vs Model 2
-##  10. Figures
+##   Model 1 = comment embeddings + parent embeddings + semantic_incong
+##   Model 2 = Model 1 + the 12 psycholinguistic features from RQ1
+##
+## Two things about this design are deliberate and load-bearing:
+##
+##   (a) The psycholinguistic block is NOT redefined here. It is
+##       sourced from features_psycholinguistic.R, the same file RQ1
+##       uses, via PSYCH_FEATURES. RQ2 asks whether RQ1's features add
+##       anything on top of embeddings; that is only a meaningful
+##       question if the block is literally the same object. Earlier
+##       versions of these two scripts had drifted -- RQ2 used
+##       sentimentr where RQ1 used VADER, defined intra-comment
+##       incongruity differently, and silently dropped quote_count.
+##
+##   (b) Model 1 gets the PARENT embeddings and semantic_incong, even
+##       though the "headline" framing is "embeddings only". Without
+##       this, Model 1 sees only the comment while Model 2 also sees
+##       parent-derived features, so any gain would be confounded with
+##       simply having access to conversational context. Giving both
+##       models the same INFORMATION SOURCES means the only thing that
+##       differs is the feature TYPE -- which is what the RQ asks
+##       about. semantic_incong belongs in Model 1 for the same
+##       reason: it is computed from embeddings, so it is an embedding
+##       feature, not a psycholinguistic one.
+##
+##   The delta between the two models is therefore attributable to the
+##   psycholinguistic features and nothing else.
+##
+## WHAT TO EXPECT (state this in the paper BEFORE running):
+##   RQ1 shows these features reach only AUC ~0.59 alone, while an
+##   untuned unigram bag-of-words reaches ~0.70. Sarcasm in this corpus
+##   is semantic, not typographic. The prediction is therefore that
+##   Model 1 lands well above 0.70 and that Model 2 adds very little.
+##   A small or null delta is the expected, publishable result here --
+##   it answers the RQ, it does not fail it.
+##
+## Structure:
+##   1. Setup
+##   2. Shared feature dataset + stratified subsample
+##   3. Semantic embeddings
+##   4. Assemble Model 1 / Model 2 + train/test split
+##   5. Train (elastic-net logistic regression, 10-fold CV)
+##   6. Evaluate (Accuracy, Precision, Recall, F1, AUC)
+##   7. Compare Model 1 vs Model 2 (DeLong test)
+##   8. Figures
 ## ==================================================================
 
 
@@ -29,342 +56,200 @@
 # 1. SETUP
 # ==================================================================
 library(tidyverse)
-library(caret)        # train(), confusionMatrix(), createDataPartition()
-library(glmnet)        # elastic-net logistic regression engine used by caret
+library(caret)         # train(), confusionMatrix(), createDataPartition()
+library(glmnet)        # elastic-net engine used by caret
 
 if (!requireNamespace("text", quietly = TRUE)) install.packages("text")
 library(text)          # textEmbed(), for the semantic-embedding features
 
-if (!requireNamespace("sentimentr", quietly = TRUE)) install.packages("sentimentr")
-library(sentimentr)    # sentence-level sentiment, used for incongruity features
-
 if (!requireNamespace("pROC", quietly = TRUE)) install.packages("pROC")
-library(pROC)          # ROC curves / AUC
+library(pROC)          # ROC curves / AUC / DeLong test
 
 if (!requireNamespace("doParallel", quietly = TRUE)) install.packages("doParallel")
 library(doParallel)    # parallel CV folds
 
-# One-time setup for the {text} package's Python backend (torch/transformers).
-# Uncomment on first use in a fresh R session / environment:
+# The shared psycholinguistic feature definitions -- same file RQ1 uses.
+source("features_psycholinguistic.R")
+
+# One-time setup for the {text} package's Python backend (torch /
+# transformers). Uncomment on first use in a fresh environment:
 # reticulate::install_miniconda()
 # textrpp_install()
-
-reticulate::conda_list()
-
 text::textrpp_initialize(save_profile = TRUE)
 
-#test_embed <- textEmbed(
-#  texts = c("This is a test.", "Another test sentence."),
-#  model = "microsoft/harrier-oss-v1-270m"
-#)
-#str(test_embed, max.level = 2)
-
-#reticulate::conda_install(
-#  envname  = "textrpp_condaenv",
-#  packages = "transformers>=4.50",
-#  pip      = TRUE
-#)
+EMBEDDING_MODEL <- "microsoft/harrier-oss-v1-270m"
 
 
 # ==================================================================
-# 2. LOAD DATA
-# --------------------------------------------------------------
-# The full corpus has 1M+ comments -- computing transformer embeddings
-# for every row is not feasible on a laptop. Instead of a random
-# sample, we cut the dataset down to a coherent, substantively
-# motivated subset: comments from marketing-relevant subreddits
-# (tech, gaming, cars, fashion, retail, entertainment). This keeps
-# the size manageable while keeping every remaining comment relevant
-# to a marketing/UGC context, rather than an arbitrary draw.
+# 2. SHARED FEATURE DATASET + STRATIFIED SUBSAMPLE
 # ==================================================================
-url <- "https://huggingface.co/datasets/marcbishara/sarcasm-on-reddit/resolve/main/train-balanced-sarcasm.csv"
-sarcasm_raw <- read_csv(url)
+# build_feature_dataset() returns the full cleaned corpus (~51k rows)
+# with all 12 psycholinguistic features already computed and cached.
+# RQ1 uses all of it. RQ2 subsamples, because embedding 2 x 51k texts
+# through a 270M-parameter transformer on a laptop is not practical --
+# and because every debugging cycle would otherwise cost hours.
+#
+# Sizing: the number that matters is the TEST set, since that is what
+# the DeLong test operates on. N_SUBSAMPLE = 20,000 gives ~4,000 test
+# rows, enough to detect a Delta AUC of roughly 0.01-0.015 -- about the
+# smallest gain worth claiming. Do NOT drop below ~10,000 total: at
+# that point a real psycholinguistic contribution becomes
+# indistinguishable from noise, which would sink the RQ.
+#
+# Set to Inf to use the full corpus. Use 5000 while developing.
+N_SUBSAMPLE <- 20000
 
-# Filter the dataset to keep only marketing-related subreddits
-sarcasm_raw <- sarcasm_raw %>%
-  filter(subreddit %in% c("apple",
-                          "iphone",
-                          "Android",
-                          "GooglePixel",
-                          "AndroidMasterRace",
-                          "windowsphone",
-                          "Surface",
-                          "GalaxyNote7",
-                          "galaxynote4",
-                          "lgv20",
-                          "pebble",
-                          "nvidia",
-                          "intel",
-                          "Amd",
-                          "razer",
-                          "hardware",
-                          "techsupport",
-                          "Steam",
-                          "playstation",
-                          "PS4",
-                          "PS4Pro",
-                          "xboxone",
-                          "NintendoSwitch",
-                          "NintendoNX",
-                          "wiiu",
-                          "askcarsales",
-                          "cars",
-                          "Autos",
-                          "BMW",
-                          "Volkswagen",
-                          "SubaruForester",
-                          "subaru",
-                          "Miata",
-                          "FocusST",
-                          "Datsun",
-                          "streetwear",
-                          "StreetwearSales",
-                          "sneakermarket",
-                          "Sneakers",
-                          "FashionReps",
-                          "supremeclothing",
-                          "bapeheads",
-                          "goodyearwelt",
-                          "frugalmalefashion",
-                          "BeautyBoxes",
-                          "MakeupAddiction",
-                          "walmart",
-                          "starbucks",
-                          "tacobell",
-                          "TalesFromRetail",
-                          "Justrolledintotheshop",
-                          "Random_Acts_Of_Amazon",
-                          "netflix",
-                          "boxoffice",
-                          "moviecritic",
-                          "television",
-                          "movies",
-                          "music",
-                          "headphones",
-                          "GameDeals",
-                          "buildapc",
-                          "buildapcsales",
-                          "pcmasterrace"))
+sarcasm_full <- build_feature_dataset()
 
-unique(sarcasm_raw$subreddit) # Check unique subreddits
-table(sarcasm_raw$label)      # Check frequencies of labels => already balanced
+set.seed(123)
+sarcasm_clean <- if (is.finite(N_SUBSAMPLE) && N_SUBSAMPLE < nrow(sarcasm_full)) {
+  # Stratified on label so the subsample keeps the corpus's balance.
+  sarcasm_full %>%
+    group_by(label_f) %>%
+    slice_sample(n = ceiling(N_SUBSAMPLE / 2)) %>%
+    ungroup()
+} else {
+  sarcasm_full
+}
 
-cat("Rows:", nrow(sarcasm_raw), "\n")
-cat("Columns:", ncol(sarcasm_raw), "\n")
-glimpse(sarcasm_raw)
-
-
-# ==================================================================
-# 3. CLEANING
-# --------------------------------------------------------------
-# We require a non-missing, non-empty parent_comment, since the
-# parent-reply incongruity feature (Model 2) needs it -- this keeps
-# Model 1 and Model 2 on the EXACT SAME rows, so the comparison is
-# fair (Model 1 does not get an advantage from a larger row set).
-# ==================================================================
-sarcasm_clean <- sarcasm_raw %>%
-  filter(!is.na(label), !is.na(comment), !is.na(parent_comment)) %>%
-  filter(nchar(trimws(comment)) > 0, nchar(trimws(parent_comment)) > 0) %>%
-  mutate(label_f = factor(label, levels = c(0, 1),
-                          labels = c("NonSarcastic", "Sarcastic"))) %>%
-  mutate(row_id = row_number())
-
-cat("\nCleaned dataset for modeling:\n")
+cat("\nRQ2 working set:", nrow(sarcasm_clean), "rows",
+    sprintf("(%.0f%% of the full corpus)\n",
+            100 * nrow(sarcasm_clean) / nrow(sarcasm_full)))
 print(table(sarcasm_clean$label_f))
 
-
-# ==================================================================
-# 4. PSYCHOLINGUISTIC FEATURE ENGINEERING
-# --------------------------------------------------------------
-# Same feature family as RQ1: punctuation, capitalization, and two
-# incongruity signals (within-comment, and comment-vs-parent).
-# ==================================================================
-
-# --- 4a. Punctuation (regex counts) ---------------------------------
-# Sarcasm markers frequently cited in the literature: exclamation
-# marks, question marks, and ellipses (often used to signal irony).
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    n_exclaim   = str_count(comment, "!"),
-    n_question  = str_count(comment, "\\?"),
-    n_ellipsis  = str_count(comment, "\\.\\.\\.|???"),
-    punct_total = n_exclaim + n_question + n_ellipsis,
-    comment_length = nchar(comment),
-    punct_density  = punct_total / pmax(comment_length, 1)  # length-normalized
-  )
-
-# --- 4b. Capitalization (uppercase word count) -----------------------
-# Words written in ALL CAPS (2+ letters, to exclude the standalone "I")
-# are a common typographic marker of sarcasm/emphasis.
-count_upper_words <- function(x) {
-  words <- str_extract_all(x, "\\b[A-Z]{2,}\\b")
-  lengths(words)
-}
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    n_upper_words   = count_upper_words(comment),
-    upper_word_rate = n_upper_words / pmax(str_count(comment, "\\S+"), 1)
-  )
-
-# --- 4c. Intra-comment incongruity ------------------------------------
-# Sarcasm often mixes sentences/clauses of opposite sentiment within
-# the SAME comment (e.g., positive wording, negative intent). We proxy
-# this with the standard deviation of sentence-level sentiment within
-# a comment -- higher SD = more internal sentiment inconsistency.
-# Single-sentence comments get 0 (no internal variation to measure).
-comment_sentiment_sentences <- sentiment(get_sentences(sarcasm_clean$comment))
-
-intra_incongruity <- comment_sentiment_sentences %>%
-  group_by(element_id) %>%
-  summarise(
-    intra_comment_incong = ifelse(n() > 1, sd(sentiment, na.rm = TRUE), 0),
-    .groups = "drop"
-  )
-
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(element_id = row_number()) %>%
-  left_join(intra_incongruity, by = "element_id") %>%
-  mutate(intra_comment_incong = replace_na(intra_comment_incong, 0)) %>%
-  select(-element_id)
-
-# --- 4d. Parent-reply incongruity (sentiment-based) -------------------
-# Document-level sentiment for the comment and for the comment it is
-# replying to; the absolute gap captures cases where a reply flips
-# the emotional tone of the conversation -- a classic sarcasm cue
-# ("Great, another Monday." after a neutral/positive parent).
-sent_comment <- sentiment_by(sarcasm_clean$comment)$ave_sentiment
-sent_parent  <- sentiment_by(sarcasm_clean$parent_comment)$ave_sentiment
-
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    sentiment_comment = sent_comment,
-    sentiment_parent  = sent_parent,
-    parent_reply_incong = abs(sentiment_comment - sentiment_parent),
-    parent_reply_flip   = as.integer(sign(sentiment_comment) != sign(sentiment_parent) &
-                                       sentiment_comment != 0 & sentiment_parent != 0)
-  )
-
-cat("\n===== Psycholinguistic Feature Summary =====\n")
+# The subsample is a random stratified draw from the same cleaned
+# corpus RQ1 describes, so RQ1's descriptive statistics still apply
+# here. Print the feature means side by side to confirm that, and put
+# the check in the appendix -- it is what licenses comparing the two
+# RQs' results at all.
+cat("\n===== Subsample vs full corpus: feature means =====\n")
 print(
-  sarcasm_clean %>%
-    group_by(label_f) %>%
-    summarise(
-      mean_punct_density   = mean(punct_density),
-      mean_upper_word_rate = mean(upper_word_rate),
-      mean_intra_incong    = mean(intra_comment_incong),
-      mean_parent_incong   = mean(parent_reply_incong),
-      .groups = "drop"
-    )
+  bind_rows(
+    sarcasm_full  %>% summarise(across(all_of(PSYCH_FEATURES), mean)) %>%
+      mutate(set = "full corpus", .before = 1),
+    sarcasm_clean %>% summarise(across(all_of(PSYCH_FEATURES), mean)) %>%
+      mutate(set = "RQ2 subsample", .before = 1)
+  ) %>% mutate(across(where(is.numeric), ~round(.x, 4)))
 )
 
 
 # ==================================================================
-# 5. SEMANTIC EMBEDDINGS (harrier-oss-v1-270m)
-# --------------------------------------------------------------
-# Document-level (mean-pooled) embeddings for both the comment and
-# its parent comment. The comment embeddings are the sole predictors
-# for Model 1, and are combined with the psycholinguistic features
-# for Model 2. The parent embeddings are only used to derive a
-# semantic (as opposed to sentiment-only) incongruity feature.
+# 3. SEMANTIC EMBEDDINGS
 # ==================================================================
-embeddings_comment <- textEmbed(
-  texts = sarcasm_clean$comment,
-  model = "microsoft/harrier-oss-v1-270m",
-  aggregation_from_tokens_to_texts = "mean",
-  keep_token_embeddings = FALSE,
-  layers = -2
-)
-saveRDS(embeddings_comment, "embeddings_comment.rds")
-# embeddings_comment <- readRDS("embeddings_comment.rds")  # reload if needed
+# Document-level (mean-pooled) embeddings for the comment and for the
+# parent comment. Both feed Model 1 -- see design note (b) at the top.
+#
+# Cached to disk because this is by far the slowest step. The cache
+# key includes the row count, so changing N_SUBSAMPLE does not
+# silently reuse embeddings computed for a different set of rows.
+emb_cache <- sprintf("embeddings_n%d.rds", nrow(sarcasm_clean))
 
-embeddings_parent <- textEmbed(
-  texts = sarcasm_clean$parent_comment,
-  model = "microsoft/harrier-oss-v1-270m",
-  aggregation_from_tokens_to_texts = "mean",
-  keep_token_embeddings = FALSE,
-  layers = -2
-)
-saveRDS(embeddings_parent, "embeddings_parent.rds")
-# embeddings_parent <- readRDS("embeddings_parent.rds")  # reload if needed
+if (file.exists(emb_cache)) {
+  cat("\nLoading cached embeddings from", emb_cache, "\n")
+  emb <- readRDS(emb_cache)
+  emb_comment <- emb$comment
+  emb_parent  <- emb$parent
+} else {
+  cat("\nEmbedding", nrow(sarcasm_clean), "comments with", EMBEDDING_MODEL,
+      "-- this is the slow step...\n")
+  embeddings_comment <- textEmbed(
+    texts = sarcasm_clean$comment,
+    model = EMBEDDING_MODEL,
+    aggregation_from_tokens_to_texts = "mean",
+    keep_token_embeddings = FALSE,
+    layers = -2
+  )
 
-emb_comment <- embeddings_comment$texts$texts   # tibble: Dim1 ... DimN
-emb_parent  <- embeddings_parent$texts$texts
+  cat("Embedding", nrow(sarcasm_clean), "parent comments...\n")
+  embeddings_parent <- textEmbed(
+    texts = sarcasm_clean$parent_comment,
+    model = EMBEDDING_MODEL,
+    aggregation_from_tokens_to_texts = "mean",
+    keep_token_embeddings = FALSE,
+    layers = -2
+  )
 
-cat("\nEmbedding dimensions:", ncol(emb_comment), "\n")
+  emb_comment <- embeddings_comment$texts$texts   # tibble: Dim1 ... DimN
+  emb_parent  <- embeddings_parent$texts$texts
 
-# --- Semantic incongruity: 1 - cosine similarity(comment, parent) ----
-# Complements the sentiment-based incongruity above: this captures
-# TOPICAL/semantic mismatch between a reply and what it replies to,
-# not just a sentiment-sign flip.
+  saveRDS(list(comment = emb_comment, parent = emb_parent), emb_cache)
+  cat("Cached embeddings to", emb_cache, "\n")
+}
+
+cat("Embedding dimensions:", ncol(emb_comment), "per text\n")
+
+# --- Semantic incongruity: 1 - cosine(comment, parent) ---------------
+# Topical/semantic mismatch between a reply and what it replies to, as
+# opposed to the sentiment-based parent_incongruity in the
+# psycholinguistic block. This is an EMBEDDING feature (it is computed
+# entirely from the embeddings), so it belongs to Model 1.
 cosine_sim <- function(a, b) sum(a * b) / (sqrt(sum(a^2)) * sqrt(sum(b^2)))
 
-semantic_incongruity <- map_dbl(seq_len(nrow(emb_comment)), function(i) {
-  1 - cosine_sim(as.numeric(emb_comment[i, ]), as.numeric(emb_parent[i, ]))
-})
-
-sarcasm_clean$semantic_incong <- semantic_incongruity
-str(embeddings_comment$tokens, max.level = 2)
-str(embeddings_comment$word_types, max.level = 2)
-packageVersion("text")
-?textEmbed
-
-test_embed <- textEmbed(
-  texts = c("This is a test.", "Another test sentence."),
-  model = "microsoft/harrier-oss-v1-270m"
-)
-str(test_embed, max.level = 2)
+mat_c <- as.matrix(emb_comment)
+mat_p <- as.matrix(emb_parent)
+semantic_incong <- 1 - rowSums(mat_c * mat_p) /
+  (sqrt(rowSums(mat_c^2)) * sqrt(rowSums(mat_p^2)))
 
 
 # ==================================================================
-# 6. ASSEMBLE MODEL DATASETS + TRAIN/TEST SPLIT
-# --------------------------------------------------------------
-# Single stratified 80/20 split, reused identically for both models
-# so Model 1 and Model 2 are evaluated on the exact same test rows.
+# 4. ASSEMBLE MODEL DATASETS + TRAIN/TEST SPLIT
 # ==================================================================
+# One stratified 80/20 split, reused identically for both models, so
+# Model 1 and Model 2 are evaluated on the exact same test rows. This
+# is also what makes the DeLong test valid -- it compares two ROC
+# curves computed on the same cases.
 set.seed(123)
-train_idx <- createDataPartition(sarcasm_clean$label_f, p = 0.8, list = FALSE)
-
+train_idx  <- createDataPartition(sarcasm_clean$label_f, p = 0.8, list = FALSE)
 split_type <- rep("test", nrow(sarcasm_clean))
 split_type[train_idx] <- "train"
-sarcasm_clean$Type <- split_type
 
 cat("\nTrain/test split:\n")
-print(table(sarcasm_clean$Type, sarcasm_clean$label_f))
+print(table(split_type, sarcasm_clean$label_f))
 
-# Rename embedding columns to avoid collisions and make both models'
-# predictor sets easy to build with a simple bind_cols().
-colnames(emb_comment) <- paste0("Emb_", colnames(emb_comment))
+# Prefix embedding columns so they cannot collide with feature names
+# and so the figures can tell the two blocks apart.
+colnames(emb_comment) <- paste0("EmbC_", colnames(emb_comment))
+colnames(emb_parent)  <- paste0("EmbP_", colnames(emb_parent))
 
-psycholinguistic_features <- sarcasm_clean %>%
-  select(punct_density, n_exclaim, n_question, n_ellipsis,
-         upper_word_rate, n_upper_words,
-         intra_comment_incong, parent_reply_incong, parent_reply_flip,
-         semantic_incong)
+# --- The embedding block (Model 1) -----------------------------------
+embedding_block <- bind_cols(emb_comment, emb_parent) %>%
+  mutate(semantic_incong = semantic_incong)
 
-# --- Model 1 dataset: embeddings ONLY ---------------------------------
-model1_data <- bind_cols(emb_comment, label = sarcasm_clean$label_f)
-model1_data$Type <- sarcasm_clean$Type
+# --- The psycholinguistic block (what Model 2 adds) ------------------
+# Straight from PSYCH_FEATURES -- identical to RQ1's predictor set.
+psych_block <- sarcasm_clean %>% select(all_of(PSYCH_FEATURES))
 
-# --- Model 2 dataset: embeddings + psycholinguistic features ----------
-model2_data <- bind_cols(emb_comment, psycholinguistic_features,
+cat("\nBlock sizes -> embeddings:", ncol(embedding_block),
+    "| psycholinguistic:", ncol(psych_block), "\n")
+
+model1_data <- bind_cols(embedding_block,
                          label = sarcasm_clean$label_f)
-model2_data$Type <- sarcasm_clean$Type
+model2_data <- bind_cols(embedding_block, psych_block,
+                         label = sarcasm_clean$label_f)
 
-model1_train <- filter(model1_data, Type == "train") %>% select(-Type)
-model1_test  <- filter(model1_data, Type == "test")  %>% select(-Type)
-model2_train <- filter(model2_data, Type == "train") %>% select(-Type)
-model2_test  <- filter(model2_data, Type == "test")  %>% select(-Type)
+model1_train <- model1_data[split_type == "train", ]
+model1_test  <- model1_data[split_type == "test",  ]
+model2_train <- model2_data[split_type == "train", ]
+model2_test  <- model2_data[split_type == "test",  ]
 
 
 # ==================================================================
-# 7. TRAIN CLASSIFIERS
-# --------------------------------------------------------------
+# 5. TRAIN CLASSIFIERS
+# ==================================================================
 # Elastic-net logistic regression (glmnet via caret), 10-fold CV.
-# Same algorithm and same CV scheme for both models -- again, so any
-# performance difference reflects the added FEATURES, not the model.
-# ==================================================================
+# Same algorithm, same CV scheme, same tuning grid, same seed for both
+# models -- so any difference reflects the added FEATURES, not the
+# modelling. Regularisation matters here: with ~1,500 embedding
+# dimensions, unpenalised logistic regression would overfit badly.
+#
+# NOTE on centring/scaling: preProcess is essential, because the
+# psycholinguistic features are on wildly different scales from the
+# embedding dimensions (raw counts vs. small floats). Without it the
+# elastic-net penalty would fall on them unevenly and Model 2 could
+# look worse than Model 1 for purely numerical reasons.
 cl <- makePSOCKcluster(max(parallel::detectCores() - 1, 1))
 registerDoParallel(cl)
+on.exit({ stopCluster(cl); registerDoSEQ() }, add = TRUE)
 
 ctrl <- trainControl(
   method = "cv", number = 10,
@@ -383,7 +268,7 @@ model1_fit <- train(
 )
 
 set.seed(123)
-cat("Training Model 2 (embeddings + psycholinguistic features)...\n")
+cat("Training Model 2 (embeddings + psycholinguistic)...\n")
 model2_fit <- train(
   label ~ ., data = model2_train,
   method = "glmnet", family = "binomial",
@@ -395,95 +280,110 @@ model2_fit <- train(
 stopCluster(cl)
 registerDoSEQ()
 
-model1_fit
-model2_fit
+print(model1_fit)
+print(model2_fit)
 
 
 # ==================================================================
-# 8. EVALUATE (Accuracy, Precision, Recall, F1, AUC)
+# 6. EVALUATE
 # ==================================================================
-
-# --- Model 1 ------------------------------------------------------
 m1_pred_class <- predict(model1_fit, newdata = model1_test)
 m1_pred_prob  <- predict(model1_fit, newdata = model1_test, type = "prob")$Sarcastic
-
 cfm_model1 <- confusionMatrix(m1_pred_class, model1_test$label,
                               positive = "Sarcastic", mode = "everything")
 print(cfm_model1)
-
 roc_model1 <- roc(response = model1_test$label, predictor = m1_pred_prob,
-                  levels = c("NonSarcastic", "Sarcastic"))
-auc_model1 <- as.numeric(auc(roc_model1))
+                  levels = c("NonSarcastic", "Sarcastic"), quiet = TRUE)
 
-# --- Model 2 --------------------------------------------------------
 m2_pred_class <- predict(model2_fit, newdata = model2_test)
 m2_pred_prob  <- predict(model2_fit, newdata = model2_test, type = "prob")$Sarcastic
-
 cfm_model2 <- confusionMatrix(m2_pred_class, model2_test$label,
                               positive = "Sarcastic", mode = "everything")
 print(cfm_model2)
-
 roc_model2 <- roc(response = model2_test$label, predictor = m2_pred_prob,
-                  levels = c("NonSarcastic", "Sarcastic"))
+                  levels = c("NonSarcastic", "Sarcastic"), quiet = TRUE)
+
+auc_model1 <- as.numeric(auc(roc_model1))
 auc_model2 <- as.numeric(auc(roc_model2))
 
-# --- DeLong test: is the AUC gap statistically significant? ---------
+# DeLong test for two CORRELATED ROC curves (same test rows, two
+# models). This is the actual statistical answer to the RQ.
 delong_test <- roc.test(roc_model1, roc_model2, method = "delong")
 print(delong_test)
 
 
 # ==================================================================
-# 9. COMPARE MODEL 1 vs MODEL 2
+# 7. COMPARE MODEL 1 vs MODEL 2
 # ==================================================================
-extract_metrics <- function(cfm, auc_val, model_name) {
+extract_metrics <- function(cfm, roc_obj, model_name) {
+  ci <- ci.auc(roc_obj)
   tibble(
     Model     = model_name,
     Accuracy  = cfm$overall["Accuracy"],
     Precision = cfm$byClass["Precision"],
     Recall    = cfm$byClass["Recall"],
     F1        = cfm$byClass["F1"],
-    AUC       = auc_val
+    AUC       = as.numeric(auc(roc_obj)),
+    AUC_lo    = ci[1],
+    AUC_hi    = ci[3]
   )
 }
 
 comparison_table <- bind_rows(
-  extract_metrics(cfm_model1, auc_model1, "Model 1: Embeddings only"),
-  extract_metrics(cfm_model2, auc_model2, "Model 2: Embeddings + Psycholinguistic")
+  extract_metrics(cfm_model1, roc_model1, "Model 1: Embeddings only"),
+  extract_metrics(cfm_model2, roc_model2, "Model 2: Embeddings + Psycholinguistic")
 )
 
 cat("\n===== MODEL COMPARISON =====\n")
-print(comparison_table)
+print(comparison_table %>% mutate(across(where(is.numeric), ~round(.x, 4))))
 
-cat("\nDeLong test p-value (AUC difference):",
-    round(delong_test$p.value, 4), "\n")
-cat("(p < .05 => the psycholinguistic features produce a\n",
-    "statistically significant change in discrimination ability)\n")
+cat(sprintf("\nDelta AUC (Model 2 - Model 1): %+.4f\n", auc_model2 - auc_model1))
+cat(sprintf("DeLong test p-value: %.4f\n", delong_test$p.value))
+if (delong_test$p.value < 0.05) {
+  cat("=> The psycholinguistic features change discrimination ability\n",
+      "   by a statistically significant amount.\n")
+} else {
+  cat("=> No significant change. Given RQ1 (these features reach only\n",
+      "   AUC ~0.59 alone, vs ~0.70 for plain unigrams), this is the\n",
+      "   EXPECTED result: sarcasm here is semantic, not typographic.\n",
+      "   Report it as an answer, not a failure.\n")
+}
 
 
 # ==================================================================
-# 10. FIGURES
+# 8. FIGURES
 # ==================================================================
+fig_dir <- "figures"
+if (!dir.exists(fig_dir)) dir.create(fig_dir)
+
 theme_report <- theme_minimal(base_size = 13) +
   theme(plot.title = element_text(face = "bold"))
 pal <- c("Model 1: Embeddings only" = "#0072B2",
          "Model 2: Embeddings + Psycholinguistic" = "#D55E00")
 
-# --- FIGURE 1: metric comparison bar chart ---------------------------
+# --- FIGURE 1: metric comparison -------------------------------------
 comparison_long <- comparison_table %>%
+  select(Model, Accuracy, Precision, Recall, F1, AUC) %>%
   pivot_longer(-Model, names_to = "Metric", values_to = "Value")
 
-ggplot(comparison_long, aes(Metric, Value, fill = Model)) +
+fig_r2_1 <- ggplot(comparison_long, aes(Metric, Value, fill = Model)) +
   geom_col(position = position_dodge(width = 0.7), width = 0.6) +
   geom_text(aes(label = round(Value, 3)),
             position = position_dodge(width = 0.7), vjust = -0.4, size = 3.2) +
   scale_fill_manual(values = pal) +
   coord_cartesian(ylim = c(0, 1)) +
-  labs(title = "Sarcasm Detection: Embeddings-Only vs. Embeddings + Psycholinguistic Features",
+  labs(title = "Does Adding Psycholinguistic Features Help?",
+       subtitle = sprintf("Delta AUC = %+.4f, DeLong p = %.4f",
+                          auc_model2 - auc_model1, delong_test$p.value),
        x = NULL, y = "Score") +
   theme_report +
-  theme(legend.position = "bottom", axis.text.x = element_text(angle = 15, hjust = 1))
+  theme(legend.position = "bottom")
 
-# --- FIGURE 2: ROC curve overlay --------------------------------------
+ggsave(file.path(fig_dir, "fig_rq2_1_metric_comparison.png"), fig_r2_1,
+       width = 10, height = 6, dpi = 300)
+print(fig_r2_1)
+
+# --- FIGURE 2: ROC overlay -------------------------------------------
 roc_df <- bind_rows(
   tibble(FPR = 1 - roc_model1$specificities, TPR = roc_model1$sensitivities,
          Model = "Model 1: Embeddings only"),
@@ -491,17 +391,21 @@ roc_df <- bind_rows(
          Model = "Model 2: Embeddings + Psycholinguistic")
 )
 
-ggplot(roc_df, aes(FPR, TPR, color = Model)) +
+fig_r2_2 <- ggplot(roc_df, aes(FPR, TPR, color = Model)) +
   geom_line(linewidth = 1) +
   geom_abline(linetype = "dashed", color = "grey50") +
   scale_color_manual(values = pal) +
   labs(title = "ROC Curves: Sarcasm Classifier Comparison",
-       subtitle = sprintf("AUC Model 1 = %.3f | AUC Model 2 = %.3f | DeLong p = %.4f",
+       subtitle = sprintf("AUC %.3f vs %.3f | DeLong p = %.4f",
                           auc_model1, auc_model2, delong_test$p.value),
        x = "False Positive Rate", y = "True Positive Rate") +
   theme_report + theme(legend.position = "bottom")
 
-# --- FIGURE 3: confusion matrices, side by side -----------------------
+ggsave(file.path(fig_dir, "fig_rq2_2_roc_comparison.png"), fig_r2_2,
+       width = 7, height = 6, dpi = 300)
+print(fig_r2_2)
+
+# --- FIGURE 3: confusion matrices ------------------------------------
 cfm_to_df <- function(cfm, model_name) {
   as.data.frame(cfm$table) %>%
     rename(Predicted = Prediction, Actual = Reference) %>%
@@ -512,7 +416,7 @@ cfm_df <- bind_rows(
   cfm_to_df(cfm_model2, "Model 2: Embeddings + Psycholinguistic")
 )
 
-ggplot(cfm_df, aes(Predicted, Actual, fill = Freq)) +
+fig_r2_3 <- ggplot(cfm_df, aes(Predicted, Actual, fill = Freq)) +
   geom_tile(color = "white") +
   geom_text(aes(label = Freq), size = 5) +
   scale_fill_gradient(low = "#f0f0f0", high = "#0072B2") +
@@ -520,21 +424,43 @@ ggplot(cfm_df, aes(Predicted, Actual, fill = Freq)) +
   labs(title = "Confusion Matrices") +
   theme_report + theme(legend.position = "none")
 
-# --- FIGURE 4: feature importance for Model 2 (top 20) -----------------
-# Shows whether the psycholinguistic features rank among the most
-# influential predictors, or whether embeddings still dominate.
+ggsave(file.path(fig_dir, "fig_rq2_3_confusion_matrices.png"), fig_r2_3,
+       width = 10, height = 5, dpi = 300)
+print(fig_r2_3)
+
+# --- FIGURE 4: where do the psycholinguistic features rank? ----------
+# The key diagnostic figure. If the psycholinguistic features are
+# buried among thousands of embedding dimensions, that visually
+# explains a null delta in section 7.
 imp2 <- varImp(model2_fit)$importance %>%
   rownames_to_column("Feature") %>%
-  mutate(IsPsycholinguistic = !str_starts(Feature, "Emb_")) %>%
-  arrange(desc(Overall)) %>%
-  slice_head(n = 20)
+  mutate(Block = if_else(Feature %in% PSYCH_FEATURES,
+                         "Psycholinguistic", "Embedding")) %>%
+  arrange(desc(Overall))
 
-ggplot(imp2, aes(reorder(Feature, Overall), Overall, fill = IsPsycholinguistic)) +
+psych_ranks <- imp2 %>%
+  mutate(rank = row_number()) %>%
+  filter(Block == "Psycholinguistic")
+
+cat("\n===== Where the psycholinguistic features rank in Model 2 =====\n")
+cat("(out of", nrow(imp2), "total predictors)\n")
+print(psych_ranks %>% select(rank, Feature, Overall))
+
+fig_r2_4 <- imp2 %>%
+  slice_head(n = 30) %>%
+  ggplot(aes(reorder(Feature, Overall), Overall, fill = Block)) +
   geom_col() +
   coord_flip() +
-  scale_fill_manual(values = c("FALSE" = "#0072B2", "TRUE" = "#D55E00"),
-                    labels = c("Embedding dim.", "Psycholinguistic"),
-                    name = NULL) +
-  labs(title = "Model 2: Top 20 Most Important Features",
+  scale_fill_manual(values = c("Embedding" = "#0072B2",
+                               "Psycholinguistic" = "#D55E00")) +
+  labs(title = "Model 2: Top 30 Predictors by Importance",
+       subtitle = sprintf("%d of %d psycholinguistic features rank in the top 30",
+                          sum(psych_ranks$rank <= 30), nrow(psych_ranks)),
        x = NULL, y = "Importance") +
   theme_report
+
+ggsave(file.path(fig_dir, "fig_rq2_4_feature_importance.png"), fig_r2_4,
+       width = 9, height = 8, dpi = 300)
+print(fig_r2_4)
+
+cat("\nRQ2 figures saved to", normalizePath(fig_dir), "\n")

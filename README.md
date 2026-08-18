@@ -46,6 +46,8 @@ Every split and `train()` call is preceded by `set.seed(123)`.
 
 - [docs/PROJECT_OVERVIEW.md](docs/PROJECT_OVERVIEW.md) — full walkthrough of the data, methods, figures, and known gaps
 - [docs/CLEANING_CROSSCHECK.md](docs/CLEANING_CROSSCHECK.md) — preprocessing decisions cross-checked against the course sessions
+- [docs/COURSE_COVERAGE_CROSSCHECK.md](docs/COURSE_COVERAGE_CROSSCHECK.md) — methods and research design cross-checked against all 11 course sessions
+- [docs/PLAN_ALIGNMENT.md](docs/PLAN_ALIGNMENT.md) — code cross-checked against the group's *Research Questions & Notes* plan and its cited feature table
 - `outputs.docx` — results document with the 36 generated plots
 
 Cached intermediates (`*.rds`), the RStudio workspace (`.RData`), and session

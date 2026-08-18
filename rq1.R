@@ -1,38 +1,41 @@
-## ==================================================================
+
+# ==================================================================
 ## RQ1: What features distinguish sarcastic comments from
 ##      non-sarcastic ones?
 ##
-## Features (drawn from sarcasm/irony theory + literature, LIWC
-## substitutes since LIWC is paid & not R-compatible):
-##   1. Punctuation        (regex counts: !, ?, ..., quotes)
-##   2. Sentiment          (VADER polarity, via reticulate)
-##   3. Capitalization     (ALL-CAPS word count/ratio)
-##   4. Intra-comment incongruity
-##        (co-occurrence of positive AND negative valence within
-##         the SAME comment -- the classic "positive sentiment,
-##         negative situation" sarcasm marker, Riloff et al. 2013;
-##         Joshi et al. 2015)
-##   5. Parent-reply incongruity
-##        (|VADER compound(comment) - VADER compound(parent_comment)|
-##         -- how much the reply's sentiment clashes with the
-##         sentiment of the comment it is replying to)
+## The feature set itself lives in features_psycholinguistic.R, which
+## is sourced by BOTH this script and rq2_embeddings.R. RQ2 asks
+## whether this same block adds anything on top of semantic
+## embeddings, and that question is only answerable if the block is
+## literally the same object in both places. See that file for the
+## per-feature definitions and the literature behind each one.
 ##
 ## Structure of this script:
 ##   1. Setup (packages)
-##   2. Load data
-##   3. Data cleaning
-##   4. Feature engineering
-##   5. Descriptive statistics
-##   6. Statistical tests (group comparisons per feature)
-##   7. Classifier (logistic regression, CV) using the 5 features
-##   8. Evaluation (confusion matrix, ROC/AUC)
-##   9. Figures
+##   2. Build the shared feature dataset
+##   3. Descriptive statistics
+##   4. Statistical tests (group comparisons + EFFECT SIZES)
+##   5. Classifier (logistic regression, CV)
+##   6. Evaluation (confusion matrix, ROC/AUC)
+##   7. Figures
+##
+## READ THIS BEFORE INTERPRETING THE OUTPUT:
+## The classifier lands around AUC 0.56. That is the correct answer
+## for this feature set on this corpus, not a bug. Section 4 reports
+## Cohen's d next to every p-value precisely because at n = 51,335 a
+## p-value of 1e-148 coexists with an effect size of ~0.03. See
+## docs/ for the full diagnosis; the short version is that SARC's
+## labels come from authors self-tagging "/s", which was then stripped
+## -- so this corpus is the LEAST typographically marked variety of
+## sarcasm, and surface cues have little left to detect. That null is
+## what motivates RQ2.
 ## ==================================================================
 
 
 # ==================================================================
 # 1. SETUP
 # ==================================================================
+
 library(tidyverse)
 library(stringr)
 library(scales)
@@ -46,187 +49,42 @@ library(pROC)           # ROC curve / AUC
 if (!requireNamespace("patchwork", quietly = TRUE)) install.packages("patchwork")
 library(patchwork)      # combine ggplot panels
 
-if (!requireNamespace("reticulate", quietly = TRUE)) install.packages("reticulate")
-library(reticulate)     # bridge to Python's vaderSentiment
-py_require("vaderSentiment")   # uncomment on first run if needed
-
-vader <- import("vaderSentiment.vaderSentiment")
-VADER_analyzer <- vader$SentimentIntensityAnalyzer()
-
-# quick sanity check
-VADER_analyzer$polarity_scores("Oh great, ANOTHER Monday. Just what I needed!!!")
+# The shared feature definitions used by both RQ1 and RQ2. This also
+# pulls in the corpus loader and the VADER scoring/caching logic, so
+# there is no data-loading or feature code left in this script.
+source("features_psycholinguistic.R")
 
 
 # ==================================================================
-# 2. LOAD DATA
+# 2. BUILD THE SHARED FEATURE DATASET
 # ==================================================================
-# Same source + same marketing-related subreddit filter as the RQ3
-# script, so RQ1 and RQ3 stay comparable/consistent within the
-# project.
-library(readr)
-url <- "https://huggingface.co/datasets/marcbishara/sarcasm-on-reddit/resolve/main/train-balanced-sarcasm.csv"
-sarcasm <- read_csv(url)
+# Downloads the corpus on first run, applies the shared cleaning
+# contract (marketing subreddits, non-empty comment AND parent, no
+# "[deleted]" placeholders), and computes all 12 psycholinguistic
+# predictors. Everything is cached to features_full.rds, so only the
+# very first run is slow. Pass refresh = TRUE to rebuild.
+sarcasm_clean <- build_feature_dataset()
 
-sarcasm <- sarcasm %>%
-  filter(subreddit %in% c("apple", "iphone", "Android", "GooglePixel",
-                          "AndroidMasterRace", "windowsphone", "Surface",
-                          "GalaxyNote7", "galaxynote4", "lgv20", "pebble",
-                          "nvidia", "intel", "Amd", "razer", "hardware",
-                          "techsupport", "Steam", "playstation", "PS4",
-                          "PS4Pro", "xboxone", "NintendoSwitch", "NintendoNX",
-                          "wiiu", "askcarsales", "cars", "Autos", "BMW",
-                          "Volkswagen", "SubaruForester", "subaru", "Miata",
-                          "FocusST", "Datsun", "streetwear", "StreetwearSales",
-                          "sneakermarket", "Sneakers", "FashionReps",
-                          "supremeclothing", "bapeheads", "goodyearwelt",
-                          "frugalmalefashion", "BeautyBoxes", "MakeupAddiction",
-                          "walmart", "starbucks", "tacobell", "TalesFromRetail",
-                          "Justrolledintotheshop", "Random_Acts_Of_Amazon",
-                          "netflix", "boxoffice", "moviecritic", "television",
-                          "movies", "music", "headphones", "GameDeals",
-                          "buildapc", "buildapcsales", "pcmasterrace"))
+cat("Rows used for RQ1:", nrow(sarcasm_clean), "\n")
+print(table(sarcasm_clean$label_f))
 
-cat("Rows after subreddit filter:", nrow(sarcasm), "\n")
-table(sarcasm$label)   # already balanced 0/1
+glimpse(sarcasm_clean %>% select(label_f, all_of(PSYCH_FEATURES), sentiment_cat))
 
 
-# ==================================================================
-# 3. DATA CLEANING
-# ==================================================================
-# We need BOTH comment and parent_comment to be usable text, since
-# feature 5 (parent-reply incongruity) depends on parent_comment.
-# "[deleted]" is Reddit's placeholder for removed content, not real
-# text -- drop it like a missing value.
-sarcasm_clean <- sarcasm %>%
-  filter(!is.na(label), !is.na(comment), !is.na(parent_comment)) %>%
-  filter(comment != "", parent_comment != "") %>%
-  filter(comment != "[deleted]", parent_comment != "[deleted]") %>%
-  mutate(label_f = factor(label, levels = c(0, 1),
-                          labels = c("Non-sarcastic", "Sarcastic")))
-
-cat("Rows used for feature engineering:", nrow(sarcasm_clean), "\n")
-# NOTE: the VADER step below runs one Python call per comment AND
-# one per parent_comment via reticulate, over the FULL filtered
-# dataset (no subsampling) -- this can take a long time on a large
-# dataset. Consider running it once and caching the result with
-# saveRDS()/readRDS() so you don't have to re-score on every re-run.
-
-
-# ==================================================================
-# 4. FEATURE ENGINEERING
-# ==================================================================
-
-# --- Feature 1: Punctuation (regex counts) --------------------------
-# Exclamation marks, question marks, ellipses, and quotation marks
-# are the punctuation markers most consistently linked to sarcasm
-# and irony in the literature (emphatic/expressive punctuation).
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    excl_count      = str_count(comment, "!"),
-    quest_count     = str_count(comment, "\\?"),
-    ellipsis_count = str_count(comment, "\\.{3,}|\\?{3,}"),
-    quote_count     = str_count(comment, '"'),
-    punct_total     = excl_count + quest_count + ellipsis_count + quote_count
-  )
-
-# --- Feature 3: Capitalization ---------------------------------------
-# ALL-CAPS words (length >= 2, so single-letter "I" doesn't count as
-# shouting/emphasis) are a common intensity/emphasis marker.
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    word_count     = str_count(comment, "\\S+"),
-    caps_count     = str_count(comment, "\\b[A-Z]{2,}\\b"),
-    caps_ratio     = ifelse(word_count > 0, caps_count / word_count, 0)
-  )
-
-# --- Feature 2: Sentiment (VADER) + Feature 4: Intra-comment ----------
-# incongruity + Feature 5 setup ---------------------------------------
-# One VADER call per comment gives us pos/neu/neg/compound in a
-# single pass -- feature 2 (sentiment) and feature 4 (intra-comment
-# incongruity) are both derived from this same call, no extra cost.
-vader_cache_file <- "vader_scores_rq1.rds"
-
-if (file.exists(vader_cache_file)) {
-  cat("Loading cached VADER scores from", vader_cache_file, "...\n")
-  vader_cache <- readRDS(vader_cache_file)
-  VADER_comment_df <- vader_cache$comment
-  VADER_parent_df  <- vader_cache$parent
-} else {
-  cat("Scoring comment sentiment with VADER on the FULL filtered dataset",
-      "(", nrow(sarcasm_clean), "rows -- this can take a long time)...\n")
-  VADER_comment <- lapply(sarcasm_clean$comment, VADER_analyzer$polarity_scores)
-  VADER_comment_df <- do.call(rbind, lapply(VADER_comment, as.data.frame)) %>%
-    rename(VADER_neg = neg, VADER_neu = neu, VADER_pos = pos,
-           VADER_compound = compound)
-  
-  cat("Scoring parent-comment sentiment with VADER...\n")
-  VADER_parent <- lapply(sarcasm_clean$parent_comment, VADER_analyzer$polarity_scores)
-  VADER_parent_df <- do.call(rbind, lapply(VADER_parent, as.data.frame)) %>%
-    select(compound) %>%
-    rename(VADER_parent_compound = compound)
-  
-  saveRDS(list(comment = VADER_comment_df, parent = VADER_parent_df),
-          vader_cache_file)
-  cat("Cached VADER scores to", vader_cache_file, "for future runs.\n")
-}
-
-sarcasm_clean <- bind_cols(sarcasm_clean, VADER_comment_df, VADER_parent_df)
-
-sarcasm_clean <- sarcasm_clean %>%
-  mutate(
-    # Feature 4: intra-comment incongruity.
-    # 2 * min(pos, neg) is highest when a comment contains a
-    # substantial amount of BOTH positive- and negative-valenced
-    # language at once (e.g. "I absolutely LOVE waiting an hour for
-    # nothing"), and is 0 when a comment is purely one-sided --
-    # exactly the "clashing valence within one utterance" pattern
-    # that sarcasm-detection literature treats as an incongruity cue.
-    intra_incongruity = 2 * pmin(VADER_pos, VADER_neg),
-    
-    # Feature 5: parent-reply incongruity.
-    # Absolute difference in compound sentiment between the reply
-    # and the comment it responds to -- large values mean the reply
-    # has swung to the opposite emotional register of its context.
-    parent_incongruity = abs(VADER_compound - VADER_parent_compound),
-    
-    # 3-level sentiment category for descriptive plots (VADER's own
-    # documented compound thresholds).
-    sentiment_cat = case_when(
-      VADER_compound >=  0.05 ~ "Positive",
-      VADER_compound <= -0.05 ~ "Negative",
-      TRUE                    ~ "Neutral"
-    ),
-    sentiment_cat = factor(sentiment_cat, levels = c("Negative", "Neutral", "Positive"))
-  )
-
-glimpse(sarcasm_clean %>%
-          select(label_f, excl_count, quest_count, ellipsis_count, quote_count,
-                 punct_total, caps_count, caps_ratio, VADER_compound,
-                 intra_incongruity, parent_incongruity, sentiment_cat))
-
-pal <- c("Non-sarcastic" = "#0072B2", "Sarcastic" = "#D55E00")
+pal <- c("NonSarcastic" = "#0072B2", "Sarcastic" = "#D55E00")
 theme_report <- theme_minimal(base_size = 13) +
   theme(plot.title = element_text(face = "bold"))
 
 
 # ==================================================================
-# 5. DESCRIPTIVE STATISTICS
+# 3. DESCRIPTIVE STATISTICS
 # ==================================================================
 cat("\n===== Feature Means by Group =====\n")
 print(
   sarcasm_clean %>%
     group_by(label_f) %>%
-    summarise(
-      n                    = n(),
-      mean_punct           = mean(punct_total),
-      mean_excl            = mean(excl_count),
-      mean_quest           = mean(quest_count),
-      mean_caps_ratio      = mean(caps_ratio),
-      mean_VADER_compound  = mean(VADER_compound),
-      mean_intra_incong    = mean(intra_incongruity),
-      mean_parent_incong   = mean(parent_incongruity),
-      .groups = "drop"
-    )
+    summarise(n = n(), across(all_of(PSYCH_FEATURES), mean), .groups = "drop") %>%
+    mutate(across(where(is.numeric), ~round(.x, 4)))
 )
 
 cat("\n===== Sentiment Category Counts (Sarcastic comments only) =====\n")
@@ -239,52 +97,90 @@ print(
 
 
 # ==================================================================
-# 6. STATISTICAL TESTS (group comparisons per feature)
+# 4. STATISTICAL TESTS + EFFECT SIZES
 # ==================================================================
-# Wilcoxon rank-sum tests: distribution-free, appropriate for the
-# skewed count/ratio features here. Reported alongside Welch's
-# t-test as in the RQ3 script for consistency.
-feature_vars <- c("punct_total", "excl_count", "quest_count",
-                  "caps_ratio", "VADER_compound",
-                  "intra_incongruity", "parent_incongruity")
+# Welch's t-test and the distribution-free Wilcoxon rank-sum test,
+# reported together as in the RQ3 script.
+#
+# Cohen's d and the single-feature AUC are reported ALONGSIDE the
+# p-values, and they are the columns that actually matter. At
+# n = 51,335 even a trivial difference returns an astronomically small
+# p-value: excl_count reaches p ~ 1e-148 on a mean gap of 0.08 marks
+# per comment. Reporting significance without effect size here would
+# actively mislead. Convention: |d| < 0.2 is negligible.
+cohens_d <- function(x, g) {
+  x1 <- x[g == 1]; x0 <- x[g == 0]
+  s_pooled <- sqrt(((length(x1) - 1) * var(x1) + (length(x0) - 1) * var(x0)) /
+                     (length(x) - 2))
+  if (s_pooled == 0) return(NA_real_)
+  (mean(x1) - mean(x0)) / s_pooled
+}
 
-test_results <- map_dfr(feature_vars, function(v) {
+test_results <- map_dfr(PSYCH_FEATURES, function(v) {
   f  <- as.formula(paste(v, "~ label"))
   tt <- t.test(f, data = sarcasm_clean)
-  wt <- wilcox.test(f, data = sarcasm_clean)
+  wt <- suppressWarnings(wilcox.test(f, data = sarcasm_clean))
+  a  <- as.numeric(pROC::auc(pROC::roc(sarcasm_clean$label, sarcasm_clean[[v]],
+                                       quiet = TRUE)))
   tibble(
-    feature       = v,
-    mean_nonsarc  = tt$estimate[1],
-    mean_sarc     = tt$estimate[2],
-    t_p_value     = tt$p.value,
-    wilcox_p      = wt$p.value
+    feature      = v,
+    mean_nonsarc = tt$estimate[1],
+    mean_sarc    = tt$estimate[2],
+    cohens_d     = cohens_d(sarcasm_clean[[v]], sarcasm_clean$label),
+    solo_auc     = max(a, 1 - a),
+    pct_zero     = 100 * mean(sarcasm_clean[[v]] == 0),
+    t_p_value    = tt$p.value,
+    wilcox_p     = wt$p.value
   )
-})
+}) %>% arrange(desc(abs(cohens_d)))
 
-cat("\n===== Group Comparison Tests (Non-sarcastic vs Sarcastic) =====\n")
-print(test_results)
+cat("\n===== Group Comparisons: NonSarcastic vs Sarcastic =====\n")
+cat("(sorted by |Cohen's d|; note how little the p-values discriminate)\n")
+print(test_results, n = Inf)
+
+# How often does a comment carry NO typographic marker at all? This is
+# the single biggest reason the classifier below is weak: if most
+# comments are all-zero on the surface features, the model has nothing
+# to separate them with and correctly falls back to the base rate.
+sarcasm_clean <- sarcasm_clean %>%
+  mutate(no_surface_marker = (excl_count == 0 & quest_count == 0 &
+                                ellipsis_count == 0 & quote_count == 0 &
+                                caps_count == 0 & interj_count == 0 &
+                                laughter_count == 0))
+
+cat("\n===== Coverage: comments carrying no typographic marker =====\n")
+cat(sprintf("%.1f%% of comments have zero surface markers.\n",
+            100 * mean(sarcasm_clean$no_surface_marker)))
+print(
+  sarcasm_clean %>%
+    group_by(no_surface_marker) %>%
+    summarise(n = n(), pct_sarcastic = round(100 * mean(label), 1),
+              .groups = "drop")
+)
+cat("Overall base rate:", round(100 * mean(sarcasm_clean$label), 1), "%\n")
 
 
 # ==================================================================
-# 7. CLASSIFIER (logistic regression, cross-validated)
+# 5. CLASSIFIER (logistic regression, cross-validated)
 # ==================================================================
-# The RQ here is about which features DISTINGUISH the two classes,
-# so a logistic regression is the natural model: it is directly
-# interpretable (coefficients = each feature's independent
-# contribution to the log-odds of sarcasm) while caret's CV +
-# confusionMatrix workflow follows the same pattern used for the
-# text classifiers in the course material.
-
+# The RQ is about which features DISTINGUISH the classes, so logistic
+# regression is the natural choice: coefficients are directly
+# interpretable as each feature's independent contribution to the
+# log-odds of sarcasm, while caret's CV + confusionMatrix workflow
+# matches the course material.
+#
+# Predictors come from PSYCH_FEATURES so this model and RQ2's
+# psycholinguistic block cannot drift apart. punct_total, caps_count
+# and raw word_count are excluded by construction -- see the header of
+# features_psycholinguistic.R for why each one is descriptive-only.
 model_data <- sarcasm_clean %>%
-  select(label_f, punct_total, excl_count, quest_count, ellipsis_count,
-         quote_count, caps_ratio, VADER_compound, intra_incongruity,
-         parent_incongruity) %>%
+  select(label_f, all_of(PSYCH_FEATURES)) %>%
   drop_na()
 
 set.seed(123)
-train_idx   <- createDataPartition(model_data$label_f, p = 0.8, list = FALSE)
-train_data  <- model_data[train_idx, ]
-test_data   <- model_data[-train_idx, ]
+train_idx  <- createDataPartition(model_data$label_f, p = 0.8, list = FALSE)
+train_data <- model_data[train_idx, ]
+test_data  <- model_data[-train_idx, ]
 
 cat("\nTraining set:", nrow(train_data), "| Test set:", nrow(test_data), "\n")
 
@@ -292,8 +188,6 @@ ctrl <- trainControl(method = "cv", number = 10,
                      savePredictions = "final", classProbs = TRUE)
 
 set.seed(123)
-levels(train_data$label_f) <- make.names(levels(train_data$label_f))
-levels(test_data$label_f)  <- make.names(levels(test_data$label_f))
 logit_model <- train(
   label_f ~ .,
   data      = train_data,
@@ -312,7 +206,7 @@ print(importance)
 
 
 # ==================================================================
-# 8. EVALUATION
+# 6. EVALUATION
 # ==================================================================
 pred_class <- predict(logit_model, newdata = test_data)
 pred_prob  <- predict(logit_model, newdata = test_data, type = "prob")[, "Sarcastic"]
@@ -320,19 +214,20 @@ pred_prob  <- predict(logit_model, newdata = test_data, type = "prob")[, "Sarcas
 cfm <- confusionMatrix(pred_class, test_data$label_f, positive = "Sarcastic")
 print(cfm)
 
-levels(test_data$label_f)
-
-roc_obj <- roc(
-  response = test_data$label_f,
-  predictor = pred_prob,
-  levels = c("Non.sarcastic", "Sarcastic")
-)
-cat("\nAUC:", round(auc(roc_obj), 3), "\n")
+roc_obj <- roc(response = test_data$label_f, predictor = pred_prob,
+               levels = c("NonSarcastic", "Sarcastic"), quiet = TRUE)
+auc_ci <- ci.auc(roc_obj)
+cat(sprintf("\nAUC: %.3f  95%% CI [%.3f, %.3f]\n",
+            as.numeric(auc(roc_obj)), auc_ci[1], auc_ci[3]))
 
 
 # ==================================================================
-# 9. FIGURES
+# 7. FIGURES
 # ==================================================================
+# Each figure is written to figures/ as a 300-dpi PNG (publication
+# quality for the term paper) and then printed to the Plots pane.
+fig_dir <- "figures"
+if (!dir.exists(fig_dir)) dir.create(fig_dir)
 
 # --- FIGURE 1: Sarcastic comments' sentiment distribution -----------
 sent_dist <- sarcasm_clean %>%
@@ -343,66 +238,100 @@ sent_dist <- sarcasm_clean %>%
 p1a <- ggplot(sent_dist, aes(sentiment_cat, n, fill = sentiment_cat)) +
   geom_col(width = .6, show.legend = FALSE) +
   geom_text(aes(label = percent(pct, accuracy = 0.1)), vjust = -0.4) +
-  scale_fill_manual(values = c(Negative = "#D55E00", Neutral = "#999999", Positive = "#0072B2")) +
-  labs(title = "Sentiment of Sarcastic Comments", x = NULL, y = "Number of Comments") +
+  scale_fill_manual(values = c(Negative = "#D55E00", Neutral = "#999999",
+                               Positive = "#0072B2")) +
+  labs(title = "Sentiment of Sarcastic Comments", x = NULL,
+       y = "Number of Comments") +
   theme_report
 
 p1b <- ggplot(sarcasm_clean %>% filter(label_f == "Sarcastic"),
-              aes(x = VADER_compound)) +
+              aes(x = vader_compound)) +
   geom_histogram(bins = 50, fill = "#D55E00", alpha = .8) +
   geom_vline(xintercept = c(-0.05, 0.05), linetype = "dashed", color = "grey30") +
-  labs(title = "VADER Compound Score Distribution", subtitle = "Sarcastic comments only",
+  labs(title = "VADER Compound Score Distribution",
+       subtitle = "Sarcastic comments only",
        x = "VADER Compound Score", y = "Count") +
   theme_report
 
-(p1a | p1b) +
+fig1 <- (p1a | p1b) +
   plot_annotation(title = "Are Sarcastic Comments More Positive or Negative?",
                   subtitle = "Dashed lines = VADER's neutral band [-0.05, 0.05]")
 
+ggsave(file.path(fig_dir, "fig1_sentiment_distribution.png"), fig1,
+       width = 11, height = 5, dpi = 300)
+print(fig1)
+
 
 # --- FIGURE 2: Feature comparison boxplots (sarcastic vs not) -------
+box_features <- c("excl_count", "caps_ratio", "interj_count",
+                  "vader_compound", "intra_incongruity", "parent_incongruity")
+
 long_features <- sarcasm_clean %>%
-  select(label_f, punct_total, caps_ratio, VADER_compound,
-         intra_incongruity, parent_incongruity) %>%
+  select(label_f, all_of(box_features)) %>%
   pivot_longer(-label_f, names_to = "feature", values_to = "value")
 
-feature_labels <- c(
-  punct_total        = "Punctuation Count",
-  caps_ratio          = "Capitalization Ratio",
-  VADER_compound      = "VADER Sentiment",
-  intra_incongruity   = "Intra-comment Incongruity",
-  parent_incongruity  = "Parent-Reply Incongruity"
-)
-
-ggplot(long_features, aes(label_f, value, fill = label_f)) +
+fig2 <- ggplot(long_features, aes(label_f, value, fill = label_f)) +
   geom_boxplot(outlier.alpha = 0.05, width = .6, show.legend = FALSE) +
   facet_wrap(~ feature, scales = "free_y",
-             labeller = as_labeller(feature_labels)) +
+             labeller = as_labeller(PSYCH_FEATURE_LABELS)) +
   scale_fill_manual(values = pal) +
   labs(title = "Feature Distributions by Sarcasm Label", x = NULL, y = "Value") +
   theme_report
 
+ggsave(file.path(fig_dir, "fig2_feature_boxplots.png"), fig2,
+       width = 10, height = 7, dpi = 300)
+print(fig2)
 
-# --- FIGURE 3: Feature importance (logistic regression) -------------
+
+# --- FIGURE 3: Effect sizes, NOT p-values ----------------------------
+# Deliberately plots Cohen's d rather than significance. The dashed
+# line marks |d| = 0.2, the conventional floor for a "small" effect --
+# it makes visible at a glance that essentially every feature falls
+# below it despite p-values in the 1e-100 range.
+fig3 <- ggplot(test_results,
+               aes(reorder(feature, abs(cohens_d)), cohens_d,
+                   fill = abs(cohens_d) >= 0.2)) +
+  geom_col(show.legend = FALSE) +
+  geom_hline(yintercept = c(-0.2, 0.2), linetype = "dashed", color = "grey40") +
+  coord_flip() +
+  scale_x_discrete(labels = PSYCH_FEATURE_LABELS) +
+  scale_fill_manual(values = c("FALSE" = "#999999", "TRUE" = "#D55E00")) +
+  labs(title = "Effect Size of Each Feature",
+       subtitle = paste("Cohen's d, sarcastic vs non-sarcastic.",
+                        "Dashed line = |d| = 0.2, the 'small effect' threshold"),
+       x = NULL, y = "Cohen's d") +
+  theme_report
+
+ggsave(file.path(fig_dir, "fig3_effect_sizes.png"), fig3,
+       width = 8, height = 5, dpi = 300)
+print(fig3)
+
+
+# --- FIGURE 4: Feature importance (logistic regression) -------------
 imp_df <- importance$importance %>%
   as.data.frame() %>%
   rownames_to_column("feature") %>%
   arrange(desc(Overall))
 
-ggplot(imp_df, aes(reorder(feature, Overall), Overall, fill = Overall)) +
+fig4 <- ggplot(imp_df, aes(reorder(feature, Overall), Overall, fill = Overall)) +
   geom_col(show.legend = FALSE) +
   coord_flip() +
+  scale_x_discrete(labels = PSYCH_FEATURE_LABELS) +
   scale_fill_viridis_c(option = "mako", direction = -1) +
   labs(title = "Feature Importance for Distinguishing Sarcasm",
-       subtitle = "Logistic regression (variable importance = |t-value|)",
+       subtitle = "Logistic regression (variable importance = |z-value|)",
        x = NULL, y = "Importance") +
   theme_report
 
+ggsave(file.path(fig_dir, "fig4_feature_importance.png"), fig4,
+       width = 8, height = 5, dpi = 300)
+print(fig4)
 
-# --- FIGURE 4: Confusion matrix heatmap ------------------------------
+
+# --- FIGURE 5: Confusion matrix heatmap ------------------------------
 cfm_df <- as.data.frame(cfm$table)
 
-ggplot(cfm_df, aes(Prediction, Reference, fill = Freq)) +
+fig5 <- ggplot(cfm_df, aes(Prediction, Reference, fill = Freq)) +
   geom_tile(color = "white") +
   geom_text(aes(label = Freq), color = "white", size = 6, fontface = "bold") +
   scale_fill_viridis_c(option = "inferno", direction = -1) +
@@ -413,17 +342,25 @@ ggplot(cfm_df, aes(Prediction, Reference, fill = Freq)) +
   theme_report +
   theme(panel.grid = element_blank())
 
+ggsave(file.path(fig_dir, "fig5_confusion_matrix.png"), fig5,
+       width = 7, height = 5, dpi = 300)
+print(fig5)
 
-# --- FIGURE 5: ROC curve ----------------------------------------------
-roc_df <- tibble(
-  fpr = 1 - roc_obj$specificities,
-  tpr = roc_obj$sensitivities
-)
 
-ggplot(roc_df, aes(fpr, tpr)) +
+# --- FIGURE 6: ROC curve ----------------------------------------------
+roc_df <- tibble(fpr = 1 - roc_obj$specificities, tpr = roc_obj$sensitivities)
+
+fig6 <- ggplot(roc_df, aes(fpr, tpr)) +
   geom_line(color = "#D55E00", linewidth = 1) +
   geom_abline(linetype = "dashed", color = "grey50") +
   labs(title = "ROC Curve: Sarcasm Classifier",
-       subtitle = paste0("AUC = ", round(auc(roc_obj), 3)),
+       subtitle = sprintf("AUC = %.3f, 95%% CI [%.3f, %.3f]",
+                          as.numeric(auc(roc_obj)), auc_ci[1], auc_ci[3]),
        x = "False Positive Rate", y = "True Positive Rate") +
   theme_report
+
+ggsave(file.path(fig_dir, "fig6_roc_curve.png"), fig6,
+       width = 6, height = 5, dpi = 300)
+print(fig6)
+
+cat("\nFigures saved to", normalizePath(fig_dir), "\n")

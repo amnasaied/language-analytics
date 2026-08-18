@@ -1,0 +1,956 @@
+<title>Code Audit — Sarcasm in Marketing-Relevant Reddit Comments</title>
+
+<style>
+  :root {
+    --bg:        #FBFBFC;
+    --surface:   #FFFFFF;
+    --surface-2: #F4F6F8;
+    --ink:       #14181D;
+    --ink-2:     #3A434E;
+    --muted:     #5A6472;
+    --rule:      #E3E7EC;
+    --rule-soft: #EDF0F3;
+    --act:       #D55E00;
+    --act-bg:    #FDF1E8;
+    --info:      #0072B2;
+    --info-bg:   #E9F2F9;
+    --ok:        #00795C;
+    --ok-bg:     #E7F4F0;
+    --shadow:    0 1px 2px rgba(20,24,29,.05), 0 8px 24px -16px rgba(20,24,29,.25);
+
+    --serif: Charter, "Bitstream Charter", "Iowan Old Style", "Source Serif Pro", Georgia, serif;
+    --sans:  -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    --mono:  ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0F1319;
+      --surface:   #161B22;
+      --surface-2: #1C222B;
+      --ink:       #E8ECF2;
+      --ink-2:     #C2CAD4;
+      --muted:     #8B96A4;
+      --rule:      #262E38;
+      --rule-soft: #1F262F;
+      --act:       #F08A4B;
+      --act-bg:    #2A1C12;
+      --info:      #56A9DC;
+      --info-bg:   #10222E;
+      --ok:        #3FBF97;
+      --ok-bg:     #0F241E;
+      --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg:        #0F1319;
+    --surface:   #161B22;
+    --surface-2: #1C222B;
+    --ink:       #E8ECF2;
+    --ink-2:     #C2CAD4;
+    --muted:     #8B96A4;
+    --rule:      #262E38;
+    --rule-soft: #1F262F;
+    --act:       #F08A4B;
+    --act-bg:    #2A1C12;
+    --info:      #56A9DC;
+    --info-bg:   #10222E;
+    --ok:        #3FBF97;
+    --ok-bg:     #0F241E;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 1.25rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 54rem; margin: 0 auto; }
+
+  /* ---------- masthead ---------- */
+
+  header.masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 3.5rem 0 2rem;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 2.5rem;
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(2rem, 5vw, 2.9rem);
+    line-height: 1.12;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    text-wrap: balance;
+    margin: 0;
+  }
+  .standfirst {
+    font-family: var(--serif);
+    font-size: 1.15rem;
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 42rem;
+    margin: 0;
+  }
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem 1.5rem;
+    font-family: var(--mono);
+    font-size: .75rem;
+    color: var(--muted);
+    padding-top: .5rem;
+  }
+  .meta span strong { color: var(--ink-2); font-weight: 600; }
+
+  /* ---------- verdict strip ---------- */
+
+  .verdict {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 3rem;
+  }
+  .verdict div {
+    background: var(--surface);
+    padding: 1.1rem 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: .3rem;
+  }
+  .verdict .n {
+    font-family: var(--serif);
+    font-size: 2rem;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .verdict .n.a { color: var(--act); }
+  .verdict .n.i { color: var(--info); }
+  .verdict .n.o { color: var(--ok); }
+  .verdict .l {
+    font-size: .8rem;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+
+  /* ---------- sections ---------- */
+
+  section { margin-bottom: 3.5rem; }
+
+  h2 {
+    font-family: var(--serif);
+    font-size: 1.65rem;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: -.005em;
+    margin: 0 0 .4rem;
+    text-wrap: balance;
+  }
+  .section-note {
+    color: var(--muted);
+    font-size: .92rem;
+    margin: 0 0 1.5rem;
+    max-width: 44rem;
+  }
+  h3 {
+    font-family: var(--serif);
+    font-size: 1.15rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  p { max-width: 44rem; }
+  p.tight { margin: .5rem 0; }
+
+  /* ---------- finding cards ---------- */
+
+  .findings { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    gap: .75rem;
+    flex-wrap: wrap;
+    padding: 1.1rem 1.35rem .6rem;
+  }
+  .id {
+    font-family: var(--mono);
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .06em;
+    padding: .2rem .45rem;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .id.act  { color: var(--act);  background: var(--act-bg); }
+  .id.info { color: var(--info); background: var(--info-bg); }
+  .id.ok   { color: var(--ok);   background: var(--ok-bg); }
+
+  .card-body { padding: 0 1.35rem 1.25rem; }
+  .card-body > *:first-child { margin-top: .3rem; }
+  .card-body > *:last-child { margin-bottom: 0; }
+
+  .where {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--muted);
+    margin: .1rem 0 .7rem;
+  }
+
+  .impact {
+    display: flex;
+    gap: .5rem;
+    align-items: baseline;
+    font-size: .88rem;
+    padding: .65rem .85rem;
+    border-radius: 3px;
+    margin: .9rem 0 0;
+    background: var(--surface-2);
+    border-left: 2px solid var(--rule);
+  }
+  .impact.act  { background: var(--act-bg);  border-left-color: var(--act); }
+  .impact.ok   { background: var(--ok-bg);   border-left-color: var(--ok); }
+  .impact.info { background: var(--info-bg); border-left-color: var(--info); }
+  .impact b {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    padding-top: .18rem;
+  }
+  .impact.act b  { color: var(--act); }
+  .impact.ok b   { color: var(--ok); }
+  .impact.info b { color: var(--info); }
+
+  /* ---------- code + tables ---------- */
+
+  code {
+    font-family: var(--mono);
+    font-size: .85em;
+    background: var(--surface-2);
+    padding: .1em .32em;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+  pre {
+    font-family: var(--mono);
+    font-size: .8rem;
+    line-height: 1.55;
+    background: var(--surface-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    padding: .85rem 1rem;
+    overflow-x: auto;
+    margin: .9rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  .del { color: var(--act); }
+  .add { color: var(--ok); }
+
+  .scroll { overflow-x: auto; margin: 1rem 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: .88rem;
+    min-width: 24rem;
+  }
+  th, td {
+    text-align: left;
+    padding: .55rem .8rem;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+  .hi-act { color: var(--act); font-weight: 600; }
+  .hi-ok  { color: var(--ok);  font-weight: 600; }
+
+  ul, ol { max-width: 44rem; padding-left: 1.2rem; }
+  li { margin-bottom: .4rem; }
+  li::marker { color: var(--muted); }
+
+  /* ---------- decisions ---------- */
+
+  .decision {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--info);
+    border-radius: 4px;
+    padding: 1.2rem 1.35rem;
+    margin-bottom: 1rem;
+  }
+  .decision h3 { margin-bottom: .5rem; }
+  .decision p:last-child { margin-bottom: 0; }
+
+  .rec {
+    font-size: .88rem;
+    color: var(--ink-2);
+    border-top: 1px dashed var(--rule);
+    padding-top: .7rem;
+    margin-top: .9rem;
+  }
+  .rec b {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--info);
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    margin-top: 4rem;
+    font-size: .85rem;
+    color: var(--muted);
+  }
+
+  a { color: var(--info); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, :focus-visible {
+    outline: 2px solid var(--info);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Code audit · 06_Exam</div>
+    <h1>Sarcasm in Marketing-Relevant Reddit Comments</h1>
+    <p class="standfirst">
+      Four fixes are needed before submission — two of them change numbers we report.
+      Most of the cleanup that looked necessary turned out not to be: measured against
+      the real data, it affects zero rows. Two questions need a team decision.
+    </p>
+    <div class="meta">
+      <span><strong>Audited</strong> 14 Aug 2026</span>
+      <span><strong>Paper due</strong> 28 Aug 2026</span>
+      <span><strong>Scope</strong> rq1.R · rq2_embeddings.R · rq3_score_analysis.R</span>
+    </div>
+  </header>
+
+  <div class="verdict">
+    <div>
+      <span class="n a">4</span>
+      <span class="l">Urgent — fix before submission</span>
+    </div>
+    <div>
+      <span class="n i">3</span>
+      <span class="l">Worth doing — cheap, protects us</span>
+    </div>
+    <div>
+      <span class="n o">4</span>
+      <span class="l">Verified non-issues — don't spend time here</span>
+    </div>
+    <div>
+      <span class="n i">2</span>
+      <span class="l">Open decisions for the team</span>
+    </div>
+  </div>
+
+  <!-- ================= URGENT ================= -->
+  <section>
+    <h2>Urgent — before submission</h2>
+    <p class="section-note">
+      <strong>U1</strong> and <strong>U4</strong> are the two that touch numbers already in the
+      write-up. <strong>U2</strong> blocks the methods section; <strong>U3</strong> means the
+      script doesn't execute at all. IDs are stable reference keys — use them in discussion.
+    </p>
+
+    <div class="findings">
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id act">U1</span>
+          <h3>RQ1's regression is rank-deficient by construction</h3>
+        </div>
+        <div class="card-body">
+          <p class="where">rq1.R:129 → rq1.R:279–281</p>
+          <p class="tight">
+            <code>punct_total</code> is defined as the <em>exact sum</em> of its four components,
+            and then all five go into the model together:
+          </p>
+<pre><code>punct_total = excl_count + quest_count + ellipsis_count + quote_count
+
+model_data &lt;- sarcasm_clean %&gt;%
+  select(label_f, <span class="del">punct_total</span>, excl_count, quest_count,
+         ellipsis_count, quote_count, ...)</code></pre>
+          <p class="tight">
+            The design matrix is therefore singular, and <code>glm</code> drops a coefficient —
+            which is exactly the <code>quote_count</code> → <code>NA</code> singularity already
+            noted in our results doc. There's a milder second version of the same problem:
+            <code>quest_count</code> counts every <code>?</code> while <code>ellipsis_count</code>
+            counts runs of <code>?{3,}</code>, so <code>???</code> is counted twice across two
+            predictors that are both in the model.
+          </p>
+
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Quantity</th><th>Effect of the fix</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Accuracy 0.531 · AUC 0.562 · Kappa 0.071</td><td class="hi-ok">Unchanged — dropping a redundant column doesn't alter fitted values</td></tr>
+                <tr><td>Coefficient table</td><td>Changes — no more <code>NA</code>, remaining estimates shift</td></tr>
+                <tr><td><code>varImp</code> ranking</td><td class="hi-act">Changes — this is what our RQ1 interpretation rests on</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="tight">
+            <strong>Fix:</strong> remove <code>punct_total</code> from the <code>select()</code>,
+            keeping its four components. Re-run rq1, refresh the RQ1 importance figure and the
+            varImp line in the results doc.
+          </p>
+          <div class="impact act">
+            <b>Why now</b>
+            <span>This is the only change in the whole audit that alters a result we report.
+            Our RQ1 story — "exclamation count = 100, VADER = 0" — is currently read off a
+            degenerate model.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id act">U2</span>
+          <h3>Model 1 isn't what the code says it is</h3>
+        </div>
+        <div class="card-body">
+          <p class="where">rq2_embeddings.R:344 · rq2_embeddings.R:468–469 vs outputs.docx</p>
+          <p class="tight">
+            Every RQ2 figure in <code>outputs.docx</code> labels the models
+            <strong>"Model 1: Merged Embeddings"</strong> and
+            <strong>"Model 2: Merged Embeddings + Psycholinguistic."</strong>
+            But the code on disk builds Model 1 from the comment embeddings alone, and labels
+            them differently:
+          </p>
+<pre><code>model1_data &lt;- bind_cols(emb_comment, label = ...)   <span class="del"># comment only</span>
+
+pal &lt;- c("Model 1: Embeddings only"  = ...,           <span class="del"># ≠ figure labels</span>
+         "Model 2: Embeddings + Psycholinguistic" = ...)</code></pre>
+          <p class="tight">
+            "Merged" most naturally means comment <em>and</em> parent embeddings combined. If so,
+            re-running the committed code produces a materially different Model 1 than the one
+            in our results.
+          </p>
+          <div class="impact act">
+            <b>Why now</b>
+            <span>Our methods section describes Model 1. We need to know which version produced
+            the numbers before we write that paragraph — this can't be resolved after the fact.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id act">U3</span>
+          <h3><code>rq2_embeddings.R</code> cannot run as committed</h3>
+        </div>
+        <div class="card-body">
+          <p class="where">rq2_embeddings.R:190 · rq2_embeddings.R:306–315</p>
+          <p class="tight">Line 190 throws a hard regex error, verified against our installed R:</p>
+<pre><code><span class="del">n_ellipsis = str_count(comment, "\\.\\.\\.|???")</span>
+  → Error: Syntax error in regex pattern (U_REGEX_RULE_SYNTAX)
+
+<span class="add">n_ellipsis = str_count(comment, "\\.{3,}|\\?{3,}")   # rq1's working version</span></code></pre>
+          <p class="tight">
+            Lines 186–194 are a single <code>mutate()</code>, so the whole statement fails
+            atomically — six columns never get created. The failure then cascades to the feature
+            assembly at line 337, where <code>select(punct_density, n_exclaim, …)</code> can't find
+            them, so <strong>Model 2 can't be built at all</strong>.
+          </p>
+          <p class="tight">
+            Separately, a scratch block sits mid-pipeline at lines 306–315 —
+            <code>packageVersion()</code>, <code>?textEmbed</code> (opens a help pane), and a
+            stray <code>test_embed &lt;- textEmbed(…)</code> that re-runs an embedding call for
+            nothing. Even with line 190 fixed, the file won't source end to end until this goes.
+          </p>
+          <div class="impact info">
+            <b>Good news</b>
+            <span>This is a regression introduced <em>after</em> our results were generated —
+            the docx shows Model 2 built cleanly with <code>n_exclaim</code> ranked #1. Our RQ2
+            numbers aren't in doubt; the file just no longer reproduces them.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id act">U4</span>
+          <h3>Drop <code>ups</code> and <code>downs</code> — one reported number is wrong</h3>
+        </div>
+        <div class="card-body">
+          <p class="where">rq3_score_analysis.R:133–135, 191–192, 292, 311, 328–338 · final-project-sarcasm-results.md:76 · PROJECT_OVERVIEW.md:143–144, 157–158</p>
+          <p class="tight">
+            <strong>The one-sentence version:</strong> <code>downs</code> never records a single
+            downvote (it's only ever <code>-1</code> or <code>0</code>), and <code>ups</code> is
+            either missing or an exact copy of <code>score</code> — so neither adds any
+            information that <code>score</code> doesn't already carry.
+          </p>
+          <p class="tight">
+            <strong>Why they're broken.</strong> Reddit stopped exposing separate up/down tallies
+            around 2014 (vote fuzzing, to frustrate bots), so the API returns only the net score
+            plus filler values. This dataset's scrape spans that change and the two chunks were
+            concatenated. Every row falls into one of two regimes, with nothing in between:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Regime</th><th>Share</th><th><code>ups</code></th><th><code>downs</code></th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Placeholder</td><td class="num">~80%</td><td class="num">-1</td><td class="num">-1</td></tr>
+                <tr><td>Real data</td><td class="num">~20%</td><td class="num">exactly <code>score</code></td><td class="num">0</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tight"><strong>Three checks confirm these are not vote counts:</strong></p>
+          <ol>
+            <li>The identity <code>score = ups − downs</code> <strong>fails</strong> — it holds in
+            100% of real-data rows but only 4.6% of placeholder rows, and those only because
+            <code>−1 − (−1) = 0</code> happens to match a score of 0.</li>
+            <li><strong>Counts are negative.</strong> <code>downs = −1</code> in 80% of rows, and
+            some rows carry <code>ups &lt; 0</code>. A tally of votes cast cannot be negative.</li>
+            <li><strong>No downvote is ever recorded.</strong> <code>max(downs) = 0</code> across
+            the sample, yet ~5% of comments have a negative score — which by definition requires
+            downvotes.</li>
+          </ol>
+          <p class="tight">
+            <strong>The split is perfectly confounded with time.</strong> It is purely
+            chronological, with a hard cutoff between September and October 2016. The file isn't
+            sorted by date, which is why it looks interleaved — adjacent rows jump between months.
+            Every real-data row is 2016-09 or earlier; every <code>-1</code> row is 2016-10 or
+            later. Score magnitude and sarcasm label explain nothing (19–20% flat across every
+            bucket, both labels). Date is the entire explanation.
+          </p>
+          <p class="tight">
+            This makes the case for dropping <em>stronger</em>, not weaker: the missingness isn't
+            noise, it's a time slice. Any model or figure using <code>ups</code> silently becomes
+            an analysis of September 2016 alone, while <code>score</code> covers the full range.
+          </p>
+
+          <div class="impact ok">
+            <b>No result contaminated</b>
+            <span>rq1, rq2, and Final Project.R never touch these columns. Within RQ3, every
+            inferential step — Welch t, Wilcoxon, Cohen's d, all three regressions
+            (rq3:218–270) — runs on <code>score</code> alone. The headline finding that sarcastic
+            comments score higher stands as-is. Nothing needs re-running.</span>
+          </div>
+
+          <p class="tight">What <em>is</em> affected is descriptive and presentational:</p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>#</th><th>Where</th><th>Problem</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="num">1</td>
+                  <td><code>final-project-sarcasm-results.md:76</code></td>
+                  <td>Reports "ups 5.16 → 6.13" alongside the score means, reading as independent
+                  corroboration. Those averages are <code>-1</code> sentinels blended with real
+                  values — which is exactly why 5.16 sits <em>below</em> the score mean of 6.59.
+                  <span class="hi-act">The one place a bad number has reached the write-up.</span></td>
+                </tr>
+                <tr>
+                  <td class="num">2</td>
+                  <td><code>rq3:292, 311</code></td>
+                  <td>Figure 1's "Ups" facet. The bars compare sarcastic vs non-sarcastic "ups,"
+                  but the difference is really how many placeholder rows landed in each group.
+                  Misleading in a submitted figure.</td>
+                </tr>
+                <tr>
+                  <td class="num">3</td>
+                  <td><code>rq3:328–338</code></td>
+                  <td>Figure 2 in full. The hexbin with its equality line and Pearson <em>r</em>
+                  presents convergent validity between two measures that are one measure — and,
+                  given the time confound, a September-2016 slice masquerading as a full-sample
+                  validation.</td>
+                </tr>
+                <tr>
+                  <td class="num">4</td>
+                  <td><code>rq3:133–135, 191–192</code> · <code>PROJECT_OVERVIEW.md:143–144, 157–158</code></td>
+                  <td>The quality check's framing and the <code>mean_ups</code>/<code>mean_downs</code>
+                  descriptive rows. Source of the "86% / r = 0.897 / kept as robustness check"
+                  conclusion — right arithmetic, wrong interpretation.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="tight">
+            <strong>Fix:</strong> one number to delete, one figure panel to drop, one figure to
+            cut, and some wording to correct. Not a re-analysis. Keep the quality check itself and
+            report it in the methods section — it is what <em>justifies</em> using
+            <code>score</code> as the single measure of public approval.
+          </p>
+
+          <div class="impact act">
+            <b>Verify first</b>
+            <span>Two numbers in our own materials disagree: the regime split says ~20% of rows
+            carry real vote data, but <code>PROJECT_OVERVIEW.md:144</code> reports
+            <code>ups == score</code> for <strong>86%</strong> of rows. Those can't both be right
+            unless most placeholder rows also have <code>score = -1</code>, which a median score
+            of 1 makes implausible. Likely an <code>NA</code>-handling artifact —
+            <code>mean(ups == score, na.rm = TRUE)</code> drops missing rows — but someone should
+            recompute both before either is quoted. The decision to drop is robust either way;
+            only the supporting percentage is in question.</span>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ================= WORTH DOING ================= -->
+  <section>
+    <h2>Worth doing</h2>
+    <p class="section-note">
+      Cheap, and each one closes a gap a marker could reasonably poke at. None of these
+      change our findings.
+    </p>
+
+    <div class="findings">
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id info">W1</span>
+          <h3>Make the figures reproducible</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            We already wrote this caveat down ourselves: <em>"plots were pasted from interactive
+            runs, so outputs.docx isn't reproducible from the repo alone."</em> Two small changes
+            retire it — cache the Hugging Face download to an <code>.rds</code> instead of
+            re-pulling a 1M-row CSV on every run of every script, and <code>ggsave()</code> the
+            figures to a <code>figures/</code> folder instead of copying them out of the RStudio pane.
+          </p>
+          <div class="impact info">
+            <b>Bonus</b>
+            <span>Uniform figure dimensions in the paper, and re-runs drop from minutes to seconds
+            while we're still iterating.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id info">W2</span>
+          <h3>Two claims we can state more strongly — for free</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            <strong>RQ2's lift is a punctuation story, not a general "psycholinguistic features
+            help" story.</strong> Of the ten psycholinguistic features, only three appear in
+            Model 2's top 20 — and all three are punctuation:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Rank</th><th>Feature</th><th>Importance</th><th>Type</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="num">1</td><td><code>n_exclaim</code></td><td class="num hi-act">100</td><td>Psycholinguistic</td></tr>
+                <tr><td class="num">2</td><td><code>Emb_Dim559</code></td><td class="num">49</td><td>Embedding dim.</td></tr>
+                <tr><td class="num">3</td><td><code>punct_density</code></td><td class="num hi-act">42</td><td>Psycholinguistic</td></tr>
+                <tr><td class="num">4–11</td><td>embedding dimensions</td><td class="num">39 → 26</td><td>Embedding dim.</td></tr>
+                <tr><td class="num">12</td><td><code>n_question</code></td><td class="num hi-act">25</td><td>Psycholinguistic</td></tr>
+                <tr><td class="num">13–20</td><td>embedding dimensions</td><td class="num">24 → 21</td><td>Embedding dim.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tight">
+            Absent entirely: <code>semantic_incong</code>, <code>intra_comment_incong</code>,
+            <code>parent_reply_incong</code>, <code>parent_reply_flip</code>,
+            <code>n_ellipsis</code>, <code>upper_word_rate</code>, <code>n_upper_words</code>.
+          </p>
+          <p class="tight">
+            This also <strong>rules out a confound I was worried about</strong>:
+            <code>semantic_incong</code> is derived from the parent comment's embedding, not from
+            psycholinguistics, so if it had ranked high, part of our RQ2 lift would have been
+            parent-context information rather than hand-crafted features. It doesn't rank. The
+            psycholinguistic reading holds.
+          </p>
+          <p class="tight">
+            <strong>Our two "intra-comment incongruity" measures point in opposite directions.</strong>
+            This is worth reporting as a finding about measurement choice, not hiding:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Measure</th><th>Non-sarc</th><th>Sarc</th><th>Direction</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>RQ1 — VADER, <code>2·min(pos,neg)</code></td><td class="num">0.0344</td><td class="num">0.0392</td><td class="hi-ok">sarcastic higher</td></tr>
+                <tr><td>RQ2 — <code>sentimentr</code>, SD of sentence sentiment</td><td class="num">0.00834</td><td class="num">0.00710</td><td class="hi-act">sarcastic lower</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tight">
+            Not just different scales — contradictory signs. RQ2's version is structurally
+            <code>0</code> for any single-sentence comment, so on Reddit it largely proxies
+            comment length rather than incongruity. Our results doc currently reports only the
+            RQ1 direction.
+          </p>
+          <div class="impact ok">
+            <b>Sanity check</b>
+            <span>Capitalization validates cleanly across both scripts — RQ1's
+            <code>caps_ratio</code> and RQ2's <code>upper_word_rate</code> both give
+            0.0277 → 0.0340, identical to four digits. They really are the same feature.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id info">W3</span>
+          <h3>The headline N is off by two</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            The results doc reports <strong>51,337</strong> as the analysis N. That's the count
+            after the subreddit filter but <em>before</em> cleaning. The modelled N is
+            <strong>51,335</strong> — confirmed two independent ways: recomputed from the raw
+            data, and read off the console screenshot in <code>outputs.docx</code>
+            (<code>NonSarcastic 24948 / Sarcastic 26387</code>, which is the label split we
+            already quote).
+          </p>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ================= DON'T ================= -->
+  <section>
+    <h2>Verified non-issues — don't spend time here</h2>
+    <p class="section-note">
+      Each of these looked like a problem and turned out not to be. I'm listing them with the
+      evidence so nobody re-opens them.
+    </p>
+
+    <div class="findings">
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id ok">N1</span>
+          <h3>The three scripts clean data differently — and it affects zero rows</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            rq1 drops <code>[deleted]</code>, rq2 doesn't, rq3 doesn't require a parent comment,
+            and the empty-string tests differ. I initially flagged this as a correctness bug.
+            <strong>I was wrong.</strong> Measured against the actual filtered corpus:
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Cleaning variant</th><th>Rows</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>rq1 as written</td><td class="num">51,335</td></tr>
+                <tr><td>rq2 as written</td><td class="num">51,335</td></tr>
+                <tr><td>rq3 as written</td><td class="num">51,335</td></tr>
+                <tr><td>Proposed unified cleaning</td><td class="num">51,335</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="tight">
+            <code>comment == "[deleted]"</code>: <strong>0 rows</strong>.
+            <code>[removed]</code>: <strong>0 rows</strong>.
+            Whitespace-only comments: <strong>0 rows</strong>.
+            The SARC balanced export was already stripped of placeholders upstream.
+          </p>
+          <div class="impact ok">
+            <b>Verdict</b>
+            <span>Unifying the cleaning is tidy but buys nothing measurable. It's latent
+            insurance for if we change the subreddit list or dataset version — not a
+            pre-deadline task.</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id ok">N2</span>
+          <h3>RQ3's one-sided t-test direction is correct</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            The reported <code>t = −1.699</code> with H1 "sarcastic &gt; non-sarcastic" looks like
+            a sign error, but isn't. <code>t.test(score ~ label, alternative = "less")</code> with
+            factor levels <code>0, 1</code> tests <em>non-sarcastic &lt; sarcastic</em> — exactly
+            our stated hypothesis. The negative statistic is consistent with that. Leave it alone.
+          </p>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id ok">N3</span>
+          <h3>Don't unify VADER vs <code>sentimentr</code></h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            RQ1 computes sentiment and incongruity with VADER; RQ2 uses <code>sentimentr</code>.
+            Unifying them would make our "RQ2 adds the RQ1 features" claim literally true, but it
+            means re-running the heaviest pipeline in the project three weeks before the deadline.
+            It's already documented as a caveat — better handled as a limitations paragraph,
+            strengthened with the contradiction evidence in <strong>W2</strong>.
+          </p>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="id ok">N4</span>
+          <h3>The general refactor can wait</h3>
+        </div>
+        <div class="card-body">
+          <p class="tight">
+            Real but cosmetic: the 63-name subreddit vector is copy-pasted four times, the
+            <code>pal</code>/<code>theme_report</code> pair three times, and
+            <code>Final Project.R</code> is superseded scratch holding a fourth copy of the list.
+            Consolidating into <code>R/00_corpus.R</code>, <code>R/theme.R</code>, and
+            <code>R/features_surface.R</code> would remove ~250 duplicated lines and one real
+            drift risk — but changes no results.
+          </p>
+          <div class="impact info">
+            <b>If we do it later</b>
+            <span>Note that <code>pal</code> isn't the same object everywhere — rq1/rq3 key it by
+            label, rq2 by model name. A naive shared <code>pal</code> would collide.</span>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- ================= DECISIONS ================= -->
+  <section>
+    <h2>Two decisions for the team</h2>
+    <p class="section-note">
+      Both block writing, not coding. Neither has an obvious default.
+    </p>
+
+    <div class="decision">
+      <h3>1. Is Model 1 comment-only, or merged comment + parent embeddings?</h3>
+      <p class="tight">
+        The figures say "Merged," the code says comment-only. Whoever ran the RQ2 pipeline
+        should confirm which one produced the numbers in <code>outputs.docx</code>. Then we make
+        the code and the methods section agree.
+      </p>
+      <p class="rec">
+        <b>Recommendation</b> — Confirm from whoever ran it rather than guessing. If nobody
+        remembers, one clean re-run settles it, and we should budget for that now rather than
+        in the final week.
+      </p>
+    </div>
+
+    <div class="decision">
+      <h3>2. How do we describe the embedding dimensions in the paper?</h3>
+      <p class="tight">
+        <code>Emb_Dim559</code> and friends are individual coordinates of the mean-pooled
+        transformer vector. They are <strong>not interpretable</strong> — no dimension corresponds
+        to "sarcasm" or "sentiment," the basis is arbitrary, and the ranking among dimensions
+        wouldn't survive a different random seed. We should not name specific dimensions as
+        findings.
+      </p>
+      <p class="tight">
+        The trap: our importance plot shows <code>n_exclaim</code> (100) beating every embedding
+        dimension (best: 49), which reads as "punctuation beats embeddings." That's backwards.
+        Embeddings alone reach <strong>AUC 0.698</strong> versus <strong>0.562</strong> for
+        hand-crafted features alone — they carry far more signal, just distributed across
+        hundreds of correlated coordinates that split the credit. <code>varImp</code> measures
+        marginal contribution, not total information.
+      </p>
+      <p class="rec">
+        <b>Suggested wording</b> — "Punctuation features rank above any individual embedding
+        dimension in Model 2, with exclamation count the strongest single predictor. This does
+        not imply punctuation carries more information than the embeddings — the embeddings alone
+        reach AUC 0.698 versus 0.562 for hand-crafted features alone — but rather that their
+        contribution is distributed across many correlated dimensions, while punctuation
+        contributes a concentrated, non-redundant signal."
+      </p>
+    </div>
+  </section>
+
+  <!-- ================= CORRECTIONS ================= -->
+  <section>
+    <h2>Corrections to earlier claims</h2>
+    <p class="section-note">
+      Two things I asserted during the audit before measuring them, so nobody acts on the
+      wrong version.
+    </p>
+    <ul>
+      <li>
+        <strong>"rq2 is training on rows whose comment text is literally <code>[deleted]</code>."</strong>
+        False — there are zero such rows. See <strong>N1</strong>.
+      </li>
+      <li>
+        <strong>"N differs across the three RQs."</strong>
+        False — all three land on exactly 51,335 rows.
+      </li>
+    </ul>
+    <p class="tight">
+      Both errors pointed the same way: they made the cleaning inconsistency look like a
+      correctness problem when it's only a maintainability one. The urgent list above
+      (<strong>U1–U3</strong>) survived measurement; the cleaning work did not.
+    </p>
+  </section>
+
+  <footer>
+    <p class="tight">
+      Line references are to the working tree as of 14 Aug 2026. Row counts recomputed from
+      the Hugging Face source; feature importances and model metrics read from the figures in
+      <code>outputs.docx</code>. The <code>ups</code>/<code>downs</code> regime analysis carries
+      over from earlier investigation — see the flagged discrepancy in <strong>U4</strong> before
+      quoting its percentages.
+    </p>
+  </footer>
+
+</div>

@@ -9,6 +9,13 @@
 *.rds
 *.RDS
 
+# --- Locally cached raw dataset (~255 MB, re-downloadable from HuggingFace) ---
+train-balanced-sarcasm.csv
+
+# --- Script run logs ---
+*.log
+Rplots.pdf
+
 # --- Course lecture notes (kept local) ---
 wiki /
 
