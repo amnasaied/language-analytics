@@ -71,9 +71,9 @@ Two models, identical classifier (elastic-net logistic, `glmnet`) and rows, diff
 
 ## RQ3 — Do sarcastic comments score higher? → statistically yes, practically no
 
-Vote-quality check first: `downs ≤ 0` for **100%** of rows → dropped; `ups` ≈ `score` (r = 0.897) → kept only as a robustness check (source: rq3_score_analysis.R; outputs.docx).
+Vote-quality check first, and it removes two of the three vote columns (source: rq3_score_analysis.R § 3, recomputed 18 Aug 2026). Reddit stopped exposing separate up/down tallies around 2014, and this scrape straddles the change, so every row sits in one of two regimes: **85.8%** carry real data (`ups == score`, `downs == 0`, 2009-09 → 2016-09) and **14.2%** carry `-1` sentinels (2016-10 → 2016-12). Three checks confirm these are not vote counts: the identity `score = ups − downs` holds in 100% of real rows but only 4.7% of sentinel rows; `ups` is negative in 20.0% of rows and `downs` in 14.2%, which no tally of votes cast can be; and `max(downs) = 0` across the corpus although 6.4% of comments have a negative score, which by definition requires downvotes. `downs` therefore records no signal at all, and `ups` — an exact copy of `score` in the 86% of rows where it is real (r = 0.897) — adds nothing. **Both are dropped; `score` is the single measure of public approval.**
 
-- **Means**: score 6.59 → **7.32**; ups 5.16 → 6.13; median 1 → 2 (source: outputs.docx).
+- **Means**: score 6.59 → **7.32**; median 1 → 2 (source: rq3_score_analysis.R). *Earlier drafts also quoted “ups 5.16 → 6.13” here as corroboration; that pair blends real values with `-1` sentinels, which is why it sits below the score means, and it has been removed.*
 - **One-sided Welch t** (H1: sarc > non-sarc): t = −1.699, **p = 0.045** — just significant.
 - **Wilcoxon**: p = 2.5×10⁻¹¹ — strongly significant on ranks.
 - **Cohen's d = 0.015** — *negligible* (the authors flag that significance is near-guaranteed at this n, so effect size is what matters).

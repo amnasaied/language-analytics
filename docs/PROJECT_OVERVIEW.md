@@ -137,11 +137,21 @@ crack the top of the ranking).
 
 ### RQ3 — Do sarcastic comments score higher? → [rq3_score_analysis.R](rq3_score_analysis.R)
 
-**Vote-data quality check first.** The script explicitly validates `ups`/`downs`
-before trusting them. Result from the saved workspace:
+**Vote-data quality check first.** The script validates `ups`/`downs` before
+trusting them, and drops both. Recomputed 18 Aug 2026 (51,337 rows, no `NA`s in
+any vote column):
 
-- `downs <= 0` for **100%** of rows → zero variance, **`downs` is dropped from all analysis**
-- `ups == score` for **86%** of rows; correlation **0.897** → `ups` kept only as a redundancy/robustness check
+- Two regimes, split cleanly by date: **85.8%** real (`ups == score`, `downs == 0`, 2009-09 → 2016-09), **14.2%** `-1` sentinels (2016-10 → 2016-12)
+- `score = ups − downs` holds in **100%** of real rows but **4.7%** of sentinel rows
+- `ups < 0` in **20.0%** of rows, `downs < 0` in **14.2%** — a vote tally cannot be negative
+- `max(downs) = 0` corpus-wide, yet **6.4%** of comments have a negative score
+- `ups == score` for **86%** of rows, correlation **0.897**
+
+→ **`downs` carries no signal and `ups` duplicates `score`; both are dropped**
+(`select(-ups, -downs)` at the end of § 3, so nothing downstream can reuse them).
+`score` is the single measure of public approval. Note the missingness is a time
+slice, not noise — restricting to real-vote rows would drop the last three months
+of the corpus.
 
 **Tests:**
 - One-sided Welch t-test, `score ~ label`, `alternative = "less"` (H1: sarcastic > non-sarcastic)
@@ -154,11 +164,12 @@ before trusting them. Result from the saved workspace:
 2. `score ~ label + comment_length + subreddit`
 3. `log1p(score) ~ label + comment_length` (skew robustness)
 
-**6 figures:** score ridgeline + mean score/ups with Wilcoxon significance
-bracket (patchwork) · ups-vs-score hexbin density with Pearson r · top-15
-subreddits by avg score vs by sarcasm rate, side by side · avg score by
-subreddit × sarcasm · monthly avg score over time with loess + volume panel ·
-comment length vs score with `lm` smoothers.
+**5 figures:** score ridgeline + mean score with Wilcoxon significance bracket
+(patchwork) · top-15 subreddits by avg score vs by sarcasm rate, side by side ·
+avg score by subreddit × sarcasm · monthly avg score over time with loess +
+volume panel · comment length vs score with `lm` smoothers. (The former
+ups-vs-score hexbin was cut: it presented convergent validity between two
+columns that are one measure.)
 
 ---
 

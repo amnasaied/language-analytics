@@ -6,7 +6,7 @@
 ## Structure of this script:
 ##   1. Setup (packages)
 ##   2. Load data
-##   3. Data quality check (ups/downs)
+##   3. Vote-data quality check (why score is the only measure)
 ##   4. Data cleaning & feature engineering
 ##   5. Descriptive statistics
 ##   6. Statistical tests (group comparisons)
@@ -19,7 +19,6 @@
 # 1. SETUP
 # ==================================================================
 library(tidyverse)
-library(skimr)
 library(lubridate)
 library(scales)
 
@@ -30,17 +29,13 @@ if (!requireNamespace("ggridges", quietly = TRUE)) install.packages("ggridges")
 library(ggridges)    # ridgeline distributions (cleaner than overlapping density)
 
 if (!requireNamespace("ggpubr", quietly = TRUE)) install.packages("ggpubr")
-library(ggpubr)      # built-in stat annotations (correlation, p-values) on plots
-
-if (!requireNamespace("hexbin", quietly = TRUE)) install.packages("hexbin")
-library(hexbin)      # required by geom_hex()
+library(ggpubr)      # significance brackets on the group-comparison plot
 
 
 # ==================================================================
 # 2. LOAD DATA
 # ==================================================================
 #Import data from Hugging Face
-library(readr)
 url <- "https://huggingface.co/datasets/marcbishara/sarcasm-on-reddit/resolve/main/train-balanced-sarcasm.csv"
 sarcasm <- read_csv(url)
 
@@ -119,35 +114,95 @@ glimpse(sarcasm)
 
 
 # ==================================================================
-# 3. DATA QUALITY CHECK: ups / downs
+# 3. VOTE-DATA QUALITY CHECK: WHY score IS THE ONLY APPROVAL MEASURE
 # --------------------------------------------------------------
-# This dataset is a well-known Kaggle export of Reddit comments.
-# Reddit's API has for years returned fuzzed or placeholder vote
-# data: "ups" is frequently identical to "score", and "downs" is
-# frequently a non-informative placeholder (0 or -1) rather than a
-# true downvote count. Run this check BEFORE trusting any
-# ups/downs comparison.
+# The export carries three vote columns -- score, ups, downs -- and it
+# is tempting to read ups/downs as independent corroboration of score.
+# They are not. Reddit stopped exposing separate up/down tallies around
+# 2014 (vote fuzzing, to frustrate bots), so the API returns only the
+# net score plus filler values. This scrape spans that change, so every
+# row falls into one of exactly two regimes with nothing in between:
+#
+#   real data    ups == score, downs == 0     comments up to 2016-09
+#   placeholder  ups == -1,    downs == -1    comments from 2016-10 on
+#
+# The three checks below are the evidence for that reading, and they
+# are what justifies using score as the single measure of public
+# approval in this RQ. Report them in the methods section -- the
+# columns are dropped at the end of this block, so nothing downstream
+# can quietly reintroduce them.
 # ==================================================================
-quality_check <- sarcasm %>%
-  summarise(
-    pct_downs_zero_or_neg = mean(downs <= 0, na.rm = TRUE) * 100,
-    pct_ups_equals_score  = mean(ups == score, na.rm = TRUE) * 100,
-    cor_ups_score         = cor(ups, score, use = "complete.obs")
-  )
 
-cat("\n--- Vote Data Quality Check ---\n")
-cat("Percent of rows where downs <= 0:   ", round(quality_check$pct_downs_zero_or_neg, 1), "%\n")
-cat("Percent of rows where ups == score: ", round(quality_check$pct_ups_equals_score, 1), "%\n")
-cat("Correlation between ups and score:  ", round(quality_check$cor_ups_score, 3), "\n")
-cat("If these percentages are high, treat 'downs' as unreliable and\n")
-cat("interpret 'ups' as effectively a duplicate of 'score', not new info.\n\n")
+vote_regimes <- sarcasm %>%
+  mutate(regime = case_when(
+    ups == -1 & downs == -1     ~ "placeholder (-1 / -1)",
+    downs == 0 & ups == score   ~ "real (ups == score, downs == 0)",
+    TRUE                        ~ "other"
+  ))
 
-# DECISION POINT based on this check:
-# If pct_downs_zero_or_neg is ~100%, 'downs' has essentially zero
-# variance in this dataset and carries no usable signal -- it is
-# dropped from all analysis and visualization below.
-# 'ups' is kept only as a robustness check against 'score', since
-# it is highly (but not perfectly) redundant with it.
+cat("\n===== Vote-data regimes =====\n")
+print(
+  vote_regimes %>%
+    group_by(regime) %>%
+    summarise(n = n(), pct = round(100 * n() / nrow(vote_regimes), 1),
+              first_month = min(date), last_month = max(date),
+              .groups = "drop")
+)
+
+# --- Check 1: the identity score = ups - downs ----------------------
+# If these were real tallies the identity would hold everywhere. It
+# holds in every real-data row and almost nowhere else -- and the few
+# placeholder rows where it "holds" only do so because -1 - (-1) = 0
+# coincides with a score of 0.
+cat("\n--- Check 1: does score == ups - downs? ---\n")
+print(
+  vote_regimes %>%
+    group_by(regime) %>%
+    summarise(n = n(),
+              pct_identity_holds = round(100 * mean(score == ups - downs), 1),
+              .groups = "drop")
+)
+
+# --- Check 2: counts that go negative -------------------------------
+# A tally of votes cast cannot be below zero. Both columns are.
+cat("\n--- Check 2: negative 'counts' ---\n")
+cat(sprintf("rows with downs < 0: %d (%.1f%%)   |   rows with ups < 0: %d (%.1f%%)\n",
+            sum(sarcasm$downs < 0), 100 * mean(sarcasm$downs < 0),
+            sum(sarcasm$ups   < 0), 100 * mean(sarcasm$ups   < 0)))
+
+# --- Check 3: no downvote is ever recorded --------------------------
+# max(downs) is 0 across the whole corpus, yet thousands of comments
+# carry a negative score -- which by definition requires downvotes.
+# The column does not record downvotes at all.
+cat("\n--- Check 3: downvotes that must exist but are never recorded ---\n")
+cat(sprintf("max(downs) = %d   |   comments with score < 0: %d (%.1f%%)\n",
+            max(sarcasm$downs),
+            sum(sarcasm$score < 0), 100 * mean(sarcasm$score < 0)))
+
+# --- Redundancy of ups where it IS real -----------------------------
+cat("\n--- Where ups is real, it is a copy of score ---\n")
+cat(sprintf("ups == score in %.1f%% of rows   |   cor(ups, score) = %.3f\n",
+            100 * mean(sarcasm$ups == sarcasm$score),
+            cor(sarcasm$ups, sarcasm$score)))
+
+# DECISION -- both columns are dropped here, for two distinct reasons:
+#
+#   downs  carries no signal at all: it is <= 0 in 100% of rows and
+#          never records a single downvote.
+#   ups    adds nothing score does not already carry. In the 86% of
+#          rows where it is real it is an exact copy of score; in the
+#          other 14% it is a -1 sentinel. Averaging the two together
+#          produces a number that is neither -- which is precisely why
+#          mean ups (5.16 / 6.13) sits BELOW mean score (6.59 / 7.32)
+#          despite "ups" supposedly counting only positive votes.
+#
+# The missingness is also not noise: it is a clean time slice, with a
+# hard cutoff between 2016-09 and 2016-10 (see the regime table above;
+# the file is not sorted by date, which is why it looks interleaved).
+# Restricting to rows with real vote data would therefore silently
+# drop the last three months of the corpus. score covers the full
+# range 2009-09 to 2016-12 and is the measure used from here on.
+sarcasm <- sarcasm %>% select(-ups, -downs)
 
 
 # ==================================================================
@@ -182,15 +237,17 @@ theme_report <- theme_minimal(base_size = 13) +
 # 5. DESCRIPTIVE STATISTICS
 # ==================================================================
 
-# Score, ups, and downs by group
-sarcasm_clean %>%
-  group_by(label_f) %>%
-  summarise(
-    n            = n(),
-    mean_score   = mean(score),   sd_score = sd(score),   median_score = median(score),
-    mean_ups     = mean(ups),     sd_ups   = sd(ups),
-    mean_downs   = mean(downs),   sd_downs = sd(downs)
-  )
+# Score by group. ups/downs are deliberately absent -- see section 3.
+cat("\n===== Score Statistics =====\n")
+print(
+  sarcasm_clean %>%
+    group_by(label_f) %>%
+    summarise(n            = n(),
+              mean_score   = mean(score),
+              sd_score     = sd(score),
+              median_score = median(score),
+              .groups = "drop")
+)
 
 # Comment length by group
 cat("\n===== Comment Length Statistics =====\n")
@@ -276,7 +333,7 @@ print(summary(model3))
 
 # --- FIGURE 1 (combined panel) --------------------------------------
 # Left:  ridgeline distribution of scores by group
-# Right: mean score & ups by group, with SE and the Wilcoxon-test
+# Right: mean score by group, with SE and the Wilcoxon-test
 #        significance bracket annotated.
 # Merged with patchwork so both are read as one figure.
 p1a <- ggplot(sarcasm_clean, aes(x = score, y = label_f, fill = label_f)) +
@@ -288,13 +345,7 @@ p1a <- ggplot(sarcasm_clean, aes(x = score, y = label_f, fill = label_f)) +
 
 summary_scores <- sarcasm_clean %>%
   group_by(label_f) %>%
-  summarise(
-    across(c(score, ups),
-           list(Mean = ~mean(.x), SE = ~sd(.x) / sqrt(n())),
-           .names = "{.col}_{.fn}")
-  ) %>%
-  pivot_longer(-label_f, names_to = c("metric", ".value"),
-               names_pattern = "(.*)_(Mean|SE)")
+  summarise(Mean = mean(score), SE = sd(score) / sqrt(n()), .groups = "drop")
 
 p1b <- ggplot(summary_scores, aes(label_f, Mean, fill = label_f)) +
   geom_col(width = .6) +
@@ -307,38 +358,19 @@ p1b <- ggplot(summary_scores, aes(label_f, Mean, fill = label_f)) +
                                            ifelse(wilcox_result$p.value < 0.05, "*", "ns")))),
     label = "p.signif", tip.length = 0.02
   ) +
-  facet_wrap(~ metric, scales = "free_y",
-             labeller = as_labeller(c(score = "Score", ups = "Ups"))) +
-  labs(title = "Mean Score & Ups", subtitle = "Wilcoxon test significance shown", x = NULL, y = "Average Value") +
+  labs(title = "Mean Score", subtitle = "Wilcoxon test significance shown",
+       x = NULL, y = "Average Score") +
   scale_fill_manual(values = pal) +
   theme_report + theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
 
 (p1a | p1b) +
   plot_annotation(
     title = "Do Sarcastic Comments Score Higher?",
-    subtitle = "downs excluded: constant (<=0) for 100% of comments, no usable signal"
+    subtitle = "score is the only vote measure used: ups is a copy of it or a -1 sentinel (section 3)"
   )
 
 
 # --- FIGURE 2 (combined panel) --------------------------------------
-# ups vs. score relationship, using a hexbin density heatmap instead
-# of a raw scatterplot -- with 1M+ rows, a scatter is just an
-# overplotted blob; hexbin actually shows where the mass of points
-# sits.
-p2 <- ggplot(sarcasm_clean, aes(score, ups)) +
-  geom_hex(bins = 60) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "white", linewidth = 0.6) +
-  coord_cartesian(xlim = c(-20, 150), ylim = c(-20, 150)) +
-  scale_fill_viridis_c(trans = "log10", labels = label_comma()) +
-  stat_cor(aes(label = after_stat(r.label)), method = "pearson", color = "white", label.x = -15, label.y = 140) +
-  labs(title = "Ups vs. Score Density", subtitle = "Dashed line = perfect equality (ups == score)",
-       x = "Score", y = "Ups", fill = "Comments\n(log scale)") +
-  theme_report
-
-p2
-
-
-# --- FIGURE 3 (combined panel) --------------------------------------
 # Left:  subreddits with highest average score
 # Right: subreddits with highest sarcasm rate
 # Merged side-by-side to compare "approval leaders" vs "sarcasm
@@ -377,7 +409,7 @@ p3b <- ggplot(sarcasm_rate, aes(reorder(subreddit, SarcasmRate), SarcasmRate)) +
   plot_annotation(title = "Subreddit Rankings", subtitle = "Subreddits with > 1,000 comments only")
 
 
-# --- FIGURE 4 (standalone) -------------------------------------------
+# --- FIGURE 3 (standalone) -------------------------------------------
 # Average score by subreddit and sarcasm, most active subreddits
 subreddit_scores <- sarcasm_clean %>%
   group_by(subreddit, label_f) %>%
@@ -400,7 +432,7 @@ ggplot(plot_data, aes(reorder(subreddit, avg_score), avg_score, fill = label_f))
   theme_report
 
 
-# --- FIGURE 5 (combined panel) ---------------------------------------
+# --- FIGURE 4 (combined panel) ---------------------------------------
 # Top:    average score over time, with a loess smoother
 # Bottom: monthly comment volume by group, sharing the same x-axis
 #         -- lets you see whether swings in the top panel line up
@@ -428,7 +460,7 @@ p5b <- ggplot(monthly, aes(month, n, fill = label_f)) +
 p5a / p5b + plot_layout(heights = c(2, 1), guides = "collect")
 
 
-# --- FIGURE 6 (standalone) --------------------------------------------
+# --- FIGURE 5 (standalone) --------------------------------------------
 # Comment length vs. score, by sarcasm group -- visual companion to
 # the control-variable regression models above.
 ggplot(sarcasm_clean, aes(comment_length, score, color = label_f)) +
