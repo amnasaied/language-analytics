@@ -35,81 +35,25 @@ library(ggpubr)      # significance brackets on the group-comparison plot
 # ==================================================================
 # 2. LOAD DATA
 # ==================================================================
-#Import data from Hugging Face
-url <- "https://huggingface.co/datasets/marcbishara/sarcasm-on-reddit/resolve/main/train-balanced-sarcasm.csv"
-sarcasm <- read_csv(url)
+# The corpus loader and the marketing-subreddit list both come from the
+# shared module, the same one RQ1 and RQ2 use. Two reasons:
+#   - load_sarcasm_raw() downloads the 255 MB CSV once and reads from
+#     disk on every run after that, instead of re-pulling it each time.
+#   - MARKETING_SUBREDDITS is defined once, so the three RQs cannot end
+#     up analysing different subreddit sets.
+# Cleaning below stays local to this script: RQ3 needs no parent
+# comment, so it does not apply the shared clean_sarcasm() contract.
+# (Both select the same 51,335 rows here -- verified -- but keeping
+# RQ3's own filter makes its weaker requirement explicit.)
+source("features_psycholinguistic.R")
 
-#Filter the dataset to keep only marketing-related subreddits
-sarcasm <- sarcasm %>%
-  filter(subreddit %in% c("apple",
-                          "iphone",
-                          "Android",
-                          "GooglePixel",
-                          "AndroidMasterRace",
-                          "windowsphone",
-                          "Surface",
-                          "GalaxyNote7",
-                          "galaxynote4",
-                          "lgv20",
-                          "pebble",
-                          "nvidia",
-                          "intel",
-                          "Amd",
-                          "razer",
-                          "hardware",
-                          "techsupport",
-                          "Steam",
-                          "playstation",
-                          "PS4",
-                          "PS4Pro",
-                          "xboxone",
-                          "NintendoSwitch",
-                          "NintendoNX",
-                          "wiiu",
-                          "askcarsales",
-                          "cars",
-                          "Autos",
-                          "BMW",
-                          "Volkswagen",
-                          "SubaruForester",
-                          "subaru",
-                          "Miata",
-                          "FocusST",
-                          "Datsun",
-                          "streetwear",
-                          "StreetwearSales",
-                          "sneakermarket",
-                          "Sneakers",
-                          "FashionReps",
-                          "supremeclothing",
-                          "bapeheads",
-                          "goodyearwelt",
-                          "frugalmalefashion",
-                          "BeautyBoxes",
-                          "MakeupAddiction",
-                          "walmart",
-                          "starbucks",
-                          "tacobell",
-                          "TalesFromRetail",
-                          "Justrolledintotheshop",
-                          "Random_Acts_Of_Amazon",
-                          "netflix",
-                          "boxoffice",
-                          "moviecritic",
-                          "television",
-                          "movies",
-                          "music",
-                          "headphones",
-                          "GameDeals",
-                          "buildapc",
-                          "buildapcsales",
-                          "pcmasterrace"))
-View(sarcasm)
-unique(sarcasm$subreddit) #Check unique subreddits  
-table(sarcasm$label) #Check frequencies of labels => Already balanced 
+sarcasm <- load_sarcasm_raw() %>%
+  filter(subreddit %in% MARKETING_SUBREDDITS)
 
 cat("Rows:", nrow(sarcasm), "\n")
 cat("Columns:", ncol(sarcasm), "\n")
+cat("Subreddits:", n_distinct(sarcasm$subreddit), "\n")
+print(table(sarcasm$label))   # already balanced by construction
 glimpse(sarcasm)
 
 
@@ -291,8 +235,9 @@ wilcox_result <- wilcox.test(
 print(wilcox_result)
 
 # --- Score: effect size (Cohen's d) ---------------------------------
-# Important given n > 1,000,000 -- statistical significance alone
-# will be nearly guaranteed here.
+# Important given n = 51,335 -- statistical significance alone is
+# nearly guaranteed at this sample size, so the effect size is the
+# number that actually answers the RQ.
 group_stats <- sarcasm_clean %>%
   group_by(label) %>%
   summarise(mean = mean(score), sd = sd(score), n = n())
@@ -330,6 +275,13 @@ print(summary(model3))
 # ==================================================================
 # 8. FIGURES
 # ==================================================================
+# Each figure is written to figures/ as a 300-dpi PNG and then printed
+# to the Plots pane -- same convention as rq1.R. Saving them from the
+# script (rather than exporting from the RStudio pane by hand) is what
+# makes the figures in the paper reproducible from this repo alone.
+fig_dir <- "figures"
+if (!dir.exists(fig_dir)) dir.create(fig_dir)
+
 
 # --- FIGURE 1 (combined panel) --------------------------------------
 # Left:  ridgeline distribution of scores by group
@@ -363,11 +315,15 @@ p1b <- ggplot(summary_scores, aes(label_f, Mean, fill = label_f)) +
   scale_fill_manual(values = pal) +
   theme_report + theme(legend.position = "none", axis.text.x = element_text(angle = 20, hjust = 1))
 
-(p1a | p1b) +
+fig1 <- (p1a | p1b) +
   plot_annotation(
     title = "Do Sarcastic Comments Score Higher?",
     subtitle = "score is the only vote measure used: ups is a copy of it or a -1 sentinel (section 3)"
   )
+
+ggsave(file.path(fig_dir, "fig_rq3_1_score_distribution.png"), fig1,
+       width = 11, height = 5, dpi = 300)
+print(fig1)
 
 
 # --- FIGURE 2 (combined panel) --------------------------------------
@@ -405,8 +361,13 @@ p3b <- ggplot(sarcasm_rate, aes(reorder(subreddit, SarcasmRate), SarcasmRate)) +
   labs(title = "Highest Sarcasm Rate", x = NULL, y = "Sarcasm Rate") +
   theme_report
 
-(p3a | p3b) +
-  plot_annotation(title = "Subreddit Rankings", subtitle = "Subreddits with > 1,000 comments only")
+fig2 <- (p3a | p3b) +
+  plot_annotation(title = "Subreddit Rankings",
+                  subtitle = "Subreddits with > 1,000 comments only")
+
+ggsave(file.path(fig_dir, "fig_rq3_2_subreddit_rankings.png"), fig2,
+       width = 11, height = 6, dpi = 300)
+print(fig2)
 
 
 # --- FIGURE 3 (standalone) -------------------------------------------
@@ -424,12 +385,18 @@ top_subs_active <- subreddit_scores %>%
 plot_data <- subreddit_scores %>%
   filter(subreddit %in% top_subs_active$subreddit)
 
-ggplot(plot_data, aes(reorder(subreddit, avg_score), avg_score, fill = label_f)) +
+fig3 <- ggplot(plot_data,
+               aes(reorder(subreddit, avg_score), avg_score, fill = label_f)) +
   geom_col(position = "dodge") +
   coord_flip() +
-  labs(title = "Average Score by Subreddit and Sarcasm", x = NULL, y = "Average Score", fill = "Comment Type") +
+  labs(title = "Average Score by Subreddit and Sarcasm", x = NULL,
+       y = "Average Score", fill = "Comment Type") +
   scale_fill_manual(values = pal) +
   theme_report
+
+ggsave(file.path(fig_dir, "fig_rq3_3_score_by_subreddit.png"), fig3,
+       width = 9, height = 6, dpi = 300)
+print(fig3)
 
 
 # --- FIGURE 4 (combined panel) ---------------------------------------
@@ -457,13 +424,17 @@ p5b <- ggplot(monthly, aes(month, n, fill = label_f)) +
   labs(x = "Month", y = "Comments", fill = NULL) +
   theme_report
 
-p5a / p5b + plot_layout(heights = c(2, 1), guides = "collect")
+fig4 <- p5a / p5b + plot_layout(heights = c(2, 1), guides = "collect")
+
+ggsave(file.path(fig_dir, "fig_rq3_4_score_over_time.png"), fig4,
+       width = 10, height = 7, dpi = 300)
+print(fig4)
 
 
 # --- FIGURE 5 (standalone) --------------------------------------------
 # Comment length vs. score, by sarcasm group -- visual companion to
 # the control-variable regression models above.
-ggplot(sarcasm_clean, aes(comment_length, score, color = label_f)) +
+fig5 <- ggplot(sarcasm_clean, aes(comment_length, score, color = label_f)) +
   geom_point(alpha = .02) +
   geom_smooth(method = "lm", se = TRUE) +
   scale_color_manual(values = pal) +
@@ -473,3 +444,9 @@ ggplot(sarcasm_clean, aes(comment_length, score, color = label_f)) +
        y = "Score",
        color = "Comment Type") +
   theme_report
+
+ggsave(file.path(fig_dir, "fig_rq3_5_length_vs_score.png"), fig5,
+       width = 8, height = 6, dpi = 300)
+print(fig5)
+
+cat("\nRQ3 figures saved to", normalizePath(fig_dir), "\n")

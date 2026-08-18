@@ -207,7 +207,7 @@ so you can decide.
 
 1. **The RQ numbers in the filenames don't match the headers.** `rq2_embeddings.R` has no RQ number in its header, and `rq3_score_analysis.R`'s header says **"RQ2"**. `outputs.docx` orders the sections RQ1 → RQ3 → RQ2. Worth settling on one numbering before submission — this overview uses the *filename* numbering.
 2. **The 64-subreddit list is duplicated four times.** If it ever changes, it has to change in four places. A shared `subreddits.R` sourced by each script would fix it.
-3. **No figures are saved to disk.** All plots are printed interactively and pasted into `outputs.docx`; nothing is reproducible from the repo alone. Adding `ggsave()` calls would make the docx rebuildable.
+3. ~~**No figures are saved to disk.**~~ **Resolved 18 Aug 2026.** Every script writes 300-dpi PNGs to `figures/` via `ggsave()` and reads its raw data from a local cache instead of re-downloading. RQ3 now runs end to end in ~8 seconds.
 
 **Correctness worth verifying**
 

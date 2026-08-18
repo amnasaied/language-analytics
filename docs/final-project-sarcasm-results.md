@@ -100,7 +100,7 @@ Vote-quality check first, and it removes two of the three vote columns (source: 
 ### Caveats carried from the code (PROJECT_OVERVIEW §6)
 - RQ1 `punct_total` double-counts `?` runs and is collinear with its components (a coefficient drops to `NA`).
 - RQ1 vs RQ2 operationalise incongruity differently (VADER vs `sentimentr`; RQ2 adds cosine-based *semantic* incongruity) — not directly comparable.
-- No figures/`.rds` are saved to disk; plots were pasted from interactive runs, so `outputs.docx` isn't reproducible from the repo alone.
+- ~~No figures/`.rds` are saved to disk~~ **Resolved 18 Aug 2026.** All three scripts now `ggsave()` to `figures/` at 300 dpi and cache their intermediates (`train-balanced-sarcasm.csv`, `vader_scores_rq1.rds`, `features_full.rds`, `embeddings_n*.rds`), so every figure is reproducible from the repo. `outputs.docx` is superseded for RQ1 and RQ3; RQ2's figures still need regenerating under its rewritten design.
 - Filename vs header RQ-numbering is inconsistent (docx orders RQ1 → RQ3 → RQ2).
 
 ## Related pages
