@@ -174,5 +174,3 @@ data %>% select(comment, parent_comment, label) %>% slice_sample(n = 10)
 # Columns available for RQ1 feature comparison: comment, parent_comment,
 # label, subreddit, author, score, ups, downs, comment_len, word_count, year
 # ------------------------------------------------------------
-
-
