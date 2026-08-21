@@ -1,0 +1,7 @@
+data/
+papers/
+*.RData*
+*.Rmd
+*.xlsx
+*.csv
+*.ipynb
