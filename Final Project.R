@@ -258,7 +258,7 @@ data <- data %>%
 # ---- word lists (documented sources — extend/cite as needed) ----
 interjections <- c("oh","wow","ugh","ah","aha","hmm","geez","argh","yay",
                    "ouch","phew","hmph","ew","meh","huh","alas","gosh",
-                   "damn","dang","yikes")
+                   "damn","dang","yikes")  
 
 intensifiers  <- c("very","really","totally","absolutely","extremely",
                    "completely","so","super","incredibly","utterly",
@@ -277,7 +277,7 @@ interj_pattern   <- paste0("(?i)\\b(", paste(interjections, collapse = "|"), ")\
 intens_pattern   <- paste0("(?i)\\b(", paste(intensifiers, collapse = "|"), ")\\b")
 
 # ---- Feature 1: Capitalization (count) ----
-data <- data %>%
+data <- data %>%  
   mutate(caps_count = str_count(comment, "\\b[A-Z]{2,}\\b"))
 
 # ---- Feature 2: Comment length (control + feature) ----
@@ -309,7 +309,7 @@ data <- data %>%
 data <- data %>% mutate(excl_count = str_count(comment, "!"))
 
 # ---- Feature 6: Ellipsis (count) ----
-data <- data %>% mutate(ellipsis_count = str_count(comment, "\\.{3,}|…"))
+data <- data %>% mutate(ellipsis_count = str_count(comment, "\\.{3,}|…"))  
 
 # ---- Feature 7: Interjections (count) ----
 data <- data %>% mutate(interjection_count = str_count(comment, interj_pattern))
@@ -635,63 +635,7 @@ final_ranking
 
 # ============================================================
 # PART 7 — DO THE TWO LABELED GROUPS FORM SEPARATE CLUSTERS?
-# ============================================================
-# LDA finds the single best linear combination of the 11 features for
-# separating sarcastic vs. non-sarcastic. If the two groups form distinct
-# clusters, their projected scores will show little overlap below.
-
-library(MASS)
-
-# NOTE: MASS defines its own select() which silently overrides dplyr::select()
-# for the REST OF THIS R SESSION, not just this script — if you later re-run
-# an earlier script (e.g. clean_sarcasm_data.R) in the same session, its
-# plain select() calls will break too with an "unused arguments" error.
-# Restoring dplyr's version here prevents that regardless of run order.
-select <- dplyr::select
-
-lda_input <- data_scaled %>%
-  select(label, all_of(feat_names)) %>%
-  na.omit()
-
-lda_model <- lda(factor(label) ~ ., data = lda_input)
-lda_scores <- predict(lda_model)$x[, 1]
-
-lda_plot_data <- tibble(
-  LD1 = lda_scores,
-  label_txt = factor(lda_input$label, labels = c("Not sarcastic","Sarcastic"))
-)
-
-# Simple, direct answer: do the two distributions separate or overlap?
-ggplot(lda_plot_data, aes(x = LD1, fill = label_txt)) +
-  geom_density(alpha = 0.5) +
-  labs(title = "Are sarcastic and non-sarcastic comments separate clusters?",
-       subtitle = "Best-case linear separation using all 11 features",
-       x = "Discriminant score", y = "Density", fill = NULL) +
-  theme_minimal()
-
-# Same result, shown as actual data points rather than a smoothed curve —
-# note LDA with 2 classes only ever produces ONE axis (classes - 1), so
-# points are jittered vertically just to avoid overplotting, not because
-# there's a second real dimension.
-lda_plot_sample <- lda_plot_data %>% slice_sample(n = min(5000, nrow(lda_plot_data)))
-
-ggplot(lda_plot_sample, aes(x = LD1, y = label_txt, color = label_txt)) +
-  geom_jitter(height = 0.2, alpha = 0.3, size = 1) +
-  labs(title = "Individual comments along the discriminant axis (5,000-point sample)",
-       x = "Discriminant score", y = NULL, color = NULL) +
-  theme_minimal() +
-  theme(legend.position = "none")
-
-# Concrete number to go with the picture: how well would this line classify?
-lda_pred <- predict(lda_model)$class
-table(Predicted = lda_pred, Actual = lda_input$label)
-mean(lda_pred == lda_input$label)   # overall accuracy of the best-case linear split
-
-# ============================================================
-# PART 7b — 2D SCATTER PLOT (PCA) — actual point clusters in 2 dimensions
-# ============================================================
-# LDA only gives ONE axis with 2 classes, so it can't produce a true 2D
-# scatter. PCA gives multiple axes regardless of class count, letting us
+#PCA gives multiple axes regardless of class count, letting us
 # plot PC1 vs PC2 as an actual 2D point cloud, colored by label afterward.
 # NOTE: PCA doesn't use the label when computing these axes — it's an
 # exploratory look at feature-space structure, not a supervised result.
@@ -713,3 +657,403 @@ ggplot(pca_scores_sample, aes(x = PC1, y = PC2, color = label_txt)) +
 # % of total variance these two axes actually capture — important context:
 # if this is low, a lot of the feature space isn't shown in this 2D view
 summary(pca_result)$importance[2, 1:2]
+
+
+# RQ2: Can integrating semantic embeddings with psycholinguistic features
+#      improve sarcasm detection over embeddings alone?
+#
+# Model 1: semantic embeddings only (parent + child comment, with separator)
+# Model 2: semantic embeddings + 11 hand-crafted features (from RQ1)
+# + RQ1's own model refit on the same split, for a 3-way comparison
+#
+# Input: `data` object already carrying the 11 RQ1 features
+#        (i.e., run rq1_full_pipeline.R Parts 0-1 first)
+# ============================================================
+
+library(dplyr)
+library(reticulate)
+library(glmnet)
+library(pROC)
+library(tibble)
+
+set.seed(1)
+
+# ============================================================
+# PART 1 — GENERATE EMBEDDINGS (microsoft/harrier-oss-v1-270m)
+# ============================================================
+# This model is decoder-only (Gemma3-based) with last-token pooling and
+# instruction-tuned prompts — an architecture the `text` package's generic
+# textEmbed() wrapper doesn't handle correctly (it silently failed in
+# testing, returning empty results with no error). The model's own
+# documentation recommends loading it directly via sentence-transformers,
+# so we do that here through reticulate instead.
+#
+# ONE-TIME SETUP (run once, in your existing textrpp_condaenv environment):
+#   reticulate::py_install("sentence-transformers", envname = "textrpp_condaenv")
+
+reticulate::use_condaenv("textrpp_condaenv", required = TRUE)
+
+sentence_transformers <- import("sentence_transformers")
+embed_model <- sentence_transformers$SentenceTransformer("microsoft/harrier-oss-v1-270m")
+
+get_embeddings <- function(texts, batch_size = 32L) {
+  embed_model$encode(texts, batch_size = as.integer(batch_size), show_progress_bar = TRUE)
+}
+
+# ---- Combine parent + child comment with a natural-language separator ----
+# This model is decoder-only (not BERT-style), so it has no trained [SEP]
+# convention for paired input — a clear textual label works better than an
+# arbitrary special token for signaling structure to this kind of model.
+combined_text <- paste0("Context: ", data$parent_comment, "\nReply: ", data$comment)
+
+# ---- Embedding generation is expensive — cache to disk, don't recompute ----
+embedding_cache_path <- "comment_context_embeddings.rds"   # renamed — different input than before
+
+if (file.exists(embedding_cache_path)) {
+  embeddings <- readRDS(embedding_cache_path)
+} else {
+  # sanity check on a tiny sample first — confirms the model loads and
+  # encodes correctly before committing to the full dataset
+  test_embed <- get_embeddings(c(
+    "Context: nice weather today\nReply: oh sure, love the rain",
+    "Context: I got promoted\nReply: congratulations, well deserved"
+  ))
+  stopifnot(nrow(test_embed) == 2, ncol(test_embed) > 0)
+  
+  embeddings <- get_embeddings(combined_text)
+  saveRDS(embeddings, embedding_cache_path)
+}
+
+embeddings <- as.data.frame(embeddings)
+colnames(embeddings) <- paste0("emb_", seq_len(ncol(embeddings)))
+
+# Sanity check: embeddings must align row-for-row with `data`
+stopifnot(nrow(embeddings) == nrow(data))
+
+# ============================================================
+# PART 2 — LEAKAGE-SAFE TRAIN/TEST SPLIT
+# ============================================================
+# Split by parent_comment (not randomly at the row level) — otherwise the
+# two replies in a matched pair could land on opposite sides of the split,
+# letting the model implicitly "see" thread context it shouldn't have.
+
+unique_parents <- unique(data$parent_comment)
+train_parents  <- sample(unique_parents, size = floor(0.8 * length(unique_parents)))
+
+data <- data %>%
+  mutate(split = if_else(parent_comment %in% train_parents, "train", "test"))
+
+table(data$split)
+prop.table(table(data$split, data$label), margin = 1)   # confirm balance held across split
+
+train_idx <- which(data$split == "train")
+test_idx  <- which(data$split == "test")
+
+# ============================================================
+# PART 3 — PREPARE FEATURE MATRICES
+# ============================================================
+
+feat_names <- c("caps_count","excl_count","ellipsis_count","interjection_count",
+                "emoticon_count","laughter_count","quote_count",
+                "intensifier_count","vader_comment","sentiment_diff","log_length")
+# has_qe excluded — caused a separation artifact in RQ1's regression
+# (OR 1347, non-significant p-value, AUC 0.5, zero RF importance)
+
+# Scale hand-crafted features using TRAIN statistics only — applying test-set
+# means/SDs would leak test-set information into the "standardization"
+train_means <- sapply(data[train_idx, feat_names], mean, na.rm = TRUE)
+train_sds   <- sapply(data[train_idx, feat_names], sd, na.rm = TRUE)
+
+scale_with_train_stats <- function(df) {
+  scaled <- sweep(as.matrix(df[, feat_names]), 2, train_means, "-")
+  scaled <- sweep(scaled, 2, train_sds, "/")
+  scaled
+}
+
+features_scaled <- scale_with_train_stats(data)
+
+# ---- Model 1 input: embeddings only ----
+X_emb <- as.matrix(embeddings)
+
+# ---- Model 2 input: embeddings + hand-crafted features ----
+X_combined <- cbind(X_emb, features_scaled)
+
+y <- data$label
+
+X_emb_train <- X_emb[train_idx, ]
+X_emb_test  <- X_emb[test_idx, ]
+
+X_combined_train <- X_combined[train_idx, ]
+X_combined_test  <- X_combined[test_idx, ]
+
+y_train <- y[train_idx]
+y_test  <- y[test_idx]
+
+# ============================================================
+# PART 4 — FIT MODEL 1 (embeddings only) — ridge logistic regression
+# ============================================================
+
+model1 <- cv.glmnet(X_emb_train, y_train, family = "binomial", alpha = 0)
+
+model1_pred_prob <- predict(model1, newx = X_emb_test, s = "lambda.min", type = "response")[, 1]
+
+# ============================================================
+# PART 5 — FIT MODEL 2 (embeddings + features) — ridge logistic regression
+# ============================================================
+
+model2 <- cv.glmnet(X_combined_train, y_train, family = "binomial", alpha = 0)
+
+model2_pred_prob <- predict(model2, newx = X_combined_test, s = "lambda.min", type = "response")[, 1]
+
+# ============================================================
+# PART 6 — REFIT THE RQ1 MODEL ON THE SAME SPLIT (for fair comparison)
+# ============================================================
+# Same formula as RQ1 (12 features + subreddit fixed effects), just fit on
+# the training portion only and evaluated on the held-out test set — RQ1's
+# original fit used the full dataset for inference, which isn't a fair
+# comparison point until it's evaluated out-of-sample like the others.
+
+top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
+
+rq1_train <- data[train_idx, ] %>% filter(subreddit %in% top_subs)
+rq1_test  <- data[test_idx, ]  %>% filter(subreddit %in% top_subs)
+
+rq1_model_refit <- glm(
+  label ~ caps_count + excl_count + ellipsis_count + interjection_count +
+    emoticon_count + laughter_count + quote_count +
+    intensifier_count + vader_comment + sentiment_diff +
+    log_length + factor(subreddit),
+  data = rq1_train,
+  family = binomial
+)
+
+# subreddits present in test but not train would break prediction — drop them
+rq1_test <- rq1_test %>% filter(subreddit %in% unique(rq1_train$subreddit))
+
+rq1_pred_prob <- predict(rq1_model_refit, newdata = rq1_test, type = "response")
+rq1_actual    <- rq1_test$label
+
+# ============================================================
+# PART 7 — EVALUATION: accuracy, precision, recall, F1, AUC
+# ============================================================
+
+evaluate_model <- function(pred_prob, actual, threshold = 0.5, model_name) {
+  pred_class <- as.integer(pred_prob > threshold)
+  cm <- table(factor(pred_class, levels = c(0,1)), factor(actual, levels = c(0,1)))
+  
+  accuracy  <- sum(diag(cm)) / sum(cm)
+  precision <- cm["1","1"] / sum(cm["1", ])
+  recall    <- cm["1","1"] / sum(cm[, "1"])
+  f1        <- 2 * precision * recall / (precision + recall)
+  auc_val   <- as.numeric(auc(actual, pred_prob, quiet = TRUE))
+  
+  tibble(
+    model = model_name,
+    accuracy = accuracy,
+    precision = precision,
+    recall = recall,
+    f1 = f1,
+    auc = auc_val
+  )
+}
+
+results <- bind_rows(
+  evaluate_model(model1_pred_prob, y_test, model_name = "Model 1: embeddings only"),
+  evaluate_model(model2_pred_prob, y_test, model_name = "Model 2: embeddings + features"),
+  evaluate_model(rq1_pred_prob, rq1_actual, model_name = "RQ1 model: features + subreddit FE")
+)
+
+results
+
+# ============================================================
+# PART 8 (OPTIONAL) — GRADIENT BOOSTING ROBUSTNESS CHECK
+# ============================================================
+# Checks whether the embeddings-vs-embeddings+features conclusion holds
+# under a non-linear classifier too, not just regularized logistic regression.
+
+library(xgboost)
+
+dtrain_m1 <- xgb.DMatrix(data = X_emb_train, label = y_train)
+dtest_m1  <- xgb.DMatrix(data = X_emb_test, label = y_test)
+
+dtrain_m2 <- xgb.DMatrix(data = X_combined_train, label = y_train)
+dtest_m2  <- xgb.DMatrix(data = X_combined_test, label = y_test)
+
+xgb_params <- list(objective = "binary:logistic", eval_metric = "logloss", max_depth = 6, eta = 0.1)
+
+xgb_model1 <- xgb.train(xgb_params, dtrain_m1, nrounds = 200,
+                        watchlist = list(test = dtest_m1), early_stopping_rounds = 15, verbose = 0)
+xgb_model2 <- xgb.train(xgb_params, dtrain_m2, nrounds = 200,
+                        watchlist = list(test = dtest_m2), early_stopping_rounds = 15, verbose = 0)
+
+xgb_pred1 <- predict(xgb_model1, dtest_m1)
+xgb_pred2 <- predict(xgb_model2, dtest_m2)
+
+results_xgb <- bind_rows(
+  evaluate_model(xgb_pred1, y_test, model_name = "XGBoost: embeddings only"),
+  evaluate_model(xgb_pred2, y_test, model_name = "XGBoost: embeddings + features")
+)
+
+results_xgb
+
+# ============================================================
+# PART 9 — FINAL COMBINED COMPARISON TABLE
+# ============================================================
+
+final_comparison <- bind_rows(results, results_xgb) %>%
+  arrange(desc(f1))
+
+final_comparison
+
+# ============================================================
+# PART 10 — ARE THE PERFORMANCE DIFFERENCES SIGNIFICANT?
+# ============================================================
+# All three core models were evaluated on the SAME test comments, so this
+# is a paired comparison — McNemar's test checks whether one model gets
+# significantly more of those specific comments right than another.
+
+compare_models_mcnemar <- function(pred_prob_a, actual_a, pred_prob_b, actual_b,
+                                   threshold = 0.5, name_a, name_b) {
+  stopifnot(length(actual_a) == length(actual_b))
+  
+  correct_a <- as.integer(pred_prob_a > threshold) == actual_a
+  correct_b <- as.integer(pred_prob_b > threshold) == actual_b
+  
+  tab <- table(correct_a, correct_b)
+  test_result <- mcnemar.test(tab)
+  
+  tibble(
+    comparison = paste(name_a, "vs.", name_b),
+    p_value = test_result$p.value
+  )
+}
+
+# NOTE: Model 1/Model 2 share y_test exactly. The RQ1 model's test set
+# (rq1_test) was filtered further (dropped unseen subreddits), so restrict
+# Model 1/Model 2's predictions to that same row subset before comparing
+# against the RQ1 model — otherwise the pairing isn't valid.
+
+rq1_comparable_idx <- which(data[test_idx, ]$subreddit %in% unique(rq1_train$subreddit) &
+                              data[test_idx, ]$subreddit %in% top_subs)
+
+mcnemar_results <- bind_rows(
+  compare_models_mcnemar(model1_pred_prob, y_test, model2_pred_prob, y_test,
+                         name_a = "Model 1 (embeddings)", name_b = "Model 2 (embeddings+features)"),
+  compare_models_mcnemar(model1_pred_prob[rq1_comparable_idx], y_test[rq1_comparable_idx],
+                         rq1_pred_prob, rq1_actual,
+                         name_a = "Model 1 (embeddings)", name_b = "RQ1 model"),
+  compare_models_mcnemar(model2_pred_prob[rq1_comparable_idx], y_test[rq1_comparable_idx],
+                         rq1_pred_prob, rq1_actual,
+                         name_a = "Model 2 (embeddings+features)", name_b = "RQ1 model")
+)
+
+mcnemar_results
+
+# ============================================================
+# PART 11 — VISUALIZE THE COMPARISON
+# ============================================================
+library(ggplot2)
+library(tidyr)
+
+final_comparison %>%
+  pivot_longer(cols = c(accuracy, precision, recall, f1, auc),
+               names_to = "metric", values_to = "value") %>%
+  ggplot(aes(x = model, y = value, fill = model)) +
+  geom_col() +
+  facet_wrap(~ metric, scales = "free_y") +
+  coord_flip() +
+  labs(title = "Model performance comparison (RQ2)", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# ============================================================
+# PART 12 — ROC CURVES (visual AUC comparison)
+# ============================================================
+
+# ---- (a) Model 1 vs Model 2 vs both XGBoost variants — full test set,
+#          since all four share the exact same y_test ----
+roc_m1     <- roc(y_test, model1_pred_prob, quiet = TRUE)
+roc_m2     <- roc(y_test, model2_pred_prob, quiet = TRUE)
+roc_xgb1   <- roc(y_test, xgb_pred1, quiet = TRUE)
+roc_xgb2   <- roc(y_test, xgb_pred2, quiet = TRUE)
+
+ggroc(list(
+  "Model 1: embeddings only"          = roc_m1,
+  "Model 2: embeddings + features"     = roc_m2,
+  "XGBoost: embeddings only"           = roc_xgb1,
+  "XGBoost: embeddings + features"     = roc_xgb2
+), size = 0.9) +
+  geom_abline(intercept = 1, slope = 1, linetype = "dashed", color = "grey60") +
+  labs(title = "ROC curves — embeddings-only vs. embeddings+features",
+       subtitle = "Linear (ridge) and non-linear (XGBoost) classifiers",
+       color = NULL, x = "Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+# ---- (b) Three-way including the RQ1 model, on the comparable subset ----
+roc_m1_sub  <- roc(y_test[rq1_comparable_idx], model1_pred_prob[rq1_comparable_idx], quiet = TRUE)
+roc_m2_sub  <- roc(y_test[rq1_comparable_idx], model2_pred_prob[rq1_comparable_idx], quiet = TRUE)
+roc_rq1     <- roc(rq1_actual, rq1_pred_prob, quiet = TRUE)
+
+ggroc(list(
+  "Model 1: embeddings only"           = roc_m1_sub,
+  "Model 2: embeddings + features"      = roc_m2_sub,
+  "RQ1 model: features + subreddit FE"  = roc_rq1
+), size = 0.9) +
+  geom_abline(intercept = 1, slope = 1, linetype = "dashed", color = "grey60") +
+  labs(title = "ROC curves — 3-way comparison including the RQ1 model",
+       subtitle = "Evaluated on the RQ1-comparable test subset",
+       color = NULL, x = "Specificity", y = "Sensitivity") +
+  theme_minimal()
+
+# ============================================================
+# PART 13 — CONFUSION MATRIX HEATMAPS
+# ============================================================
+
+make_cm_df <- function(pred_prob, actual, model_name, threshold = 0.5) {
+  pred_class <- as.integer(pred_prob > threshold)
+  tab <- table(Predicted = pred_class, Actual = actual)
+  as.data.frame(tab) %>%
+    mutate(model = model_name,
+           pct = Freq / sum(Freq))
+}
+
+cm_all <- bind_rows(
+  make_cm_df(model1_pred_prob, y_test, "Model 1: embeddings only"),
+  make_cm_df(model2_pred_prob, y_test, "Model 2: embeddings + features"),
+  make_cm_df(rq1_pred_prob, rq1_actual, "RQ1 model: features + subreddit FE")
+)
+
+ggplot(cm_all, aes(x = Actual, y = Predicted, fill = pct)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = paste0(Freq, "\n(", scales::percent(pct, accuracy = 0.1), ")")),
+            size = 3.2) +
+  scale_fill_gradient(low = "white", high = "steelblue", labels = scales::percent) +
+  facet_wrap(~ model) +
+  labs(title = "Confusion matrices by model", fill = "% of test set") +
+  theme_minimal()
+
+# ============================================================
+# PART 14 — FINAL ANNOTATED SUMMARY TABLE
+# ============================================================
+# Combines performance metrics with pairwise significance flags in one place
+
+metrics_table <- final_comparison %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+metrics_table
+
+significance_table <- mcnemar_results %>%
+  mutate(
+    p_value = round(p_value, 4),
+    significant_at_05 = if_else(p_value < 0.05, "Yes", "No")
+  )
+
+significance_table
+
+# ---- Combined narrative table: metrics ranked, with a note on which
+#      differences are statistically confirmed ----
+cat("\n=== RQ2 Summary ===\n")
+cat("\nPerformance metrics (ranked by F1):\n")
+print(metrics_table)
+cat("\nPairwise significance (McNemar's test, paired on shared test comments):\n")
+print(significance_table)
