@@ -5,3 +5,4 @@ papers/
 *.xlsx
 *.csv
 *.ipynb
+.Rproj.user/

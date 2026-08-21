@@ -358,6 +358,78 @@ data <- data %>%
 data <- data %>% dplyr::select(-any_of(c("ups", "downs")))
 
 # ============================================================
+# PART 1b — FEATURE AVAILABILITY (PREVALENCE) VISUALS
+# ------------------------------------------------------------
+# "Availability" = does a comment CONTAIN the feature at all (count > 0),
+# not how strong it is. Only the presence/absence markers apply here.
+# Sentiment, length and sentiment_diff are continuous (effectively always
+# present), so they are NOT shown as have/not-have — they belong in the
+# distribution comparisons (Parts 2 & 3).
+# ============================================================
+
+# marker features + human-readable labels (order = display order)
+marker_cols <- c("caps_count","excl_count","ellipsis_count","interjection_count",
+                 "emoticon_count","laughter_count","quote_count","intensifier_count")
+marker_labels <- c(caps_count = "Capitalization", excl_count = "Exclamation",
+                   ellipsis_count = "Ellipsis", interjection_count = "Interjections",
+                   emoticon_count = "Emoticons", laughter_count = "Laughter",
+                   quote_count = "Quotation marks", intensifier_count = "Intensifiers")
+
+# ---- 1b.1 Overall: % of comments that HAVE vs do NOT have each feature ----
+overall_presence <- data %>%
+  summarise(across(all_of(marker_cols), ~ mean(.x > 0) * 100)) %>%
+  pivot_longer(everything(), names_to = "feature", values_to = "Has feature") %>%
+  mutate(`No feature` = 100 - `Has feature`,
+         feature = marker_labels[feature])
+
+# order features by how common they are (most available at the top)
+order_lv <- overall_presence %>% arrange(`Has feature`) %>% pull(feature)
+
+overall_long <- overall_presence %>%
+  pivot_longer(c(`Has feature`, `No feature`),
+               names_to = "status", values_to = "pct") %>%
+  mutate(feature = factor(feature, levels = order_lv),
+         status  = factor(status, levels = c("No feature", "Has feature")))
+
+ggplot(overall_long, aes(x = feature, y = pct, fill = status)) +
+  geom_col(width = 0.75) +
+  geom_text(data = subset(overall_long, status == "Has feature"),
+            aes(label = sprintf("%.1f%%", pct)), hjust = -0.1, size = 3) +
+  coord_flip() +
+  scale_y_continuous(labels = label_percent(scale = 1), limits = c(0, 100)) +
+  scale_fill_manual(values = c("No feature" = "grey80", "Has feature" = "#2c7fb8")) +
+  labs(title = "Feature availability across all comments",
+       subtitle = "% of comments that contain each feature vs. that do not",
+       x = NULL, y = "% of comments", fill = NULL) +
+  theme_minimal()
+
+# ---- 1b.2 Availability by class: sarcastic vs not sarcastic ----
+by_label <- data %>%
+  group_by(label) %>%
+  summarise(across(all_of(marker_cols), ~ mean(.x > 0) * 100), .groups = "drop") %>%
+  pivot_longer(-label, names_to = "feature", values_to = "pct_present") %>%
+  mutate(feature   = factor(marker_labels[feature], levels = order_lv),
+         label_txt = factor(label, labels = c("Not sarcastic", "Sarcastic")))
+
+ggplot(by_label, aes(x = feature, y = pct_present, fill = label_txt)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = label_percent(scale = 1)) +
+  scale_fill_manual(values = c("Not sarcastic" = "grey65", "Sarcastic" = "#d95f0e")) +
+  labs(title = "Feature availability: sarcastic vs. not sarcastic",
+       subtitle = "% of comments containing each feature, by class",
+       x = NULL, y = "% of comments containing feature", fill = NULL) +
+  theme_minimal()
+
+# ---- 1b.3 Underlying numbers (sorted by biggest sarcastic-vs-not gap) ----
+availability_table <- by_label %>%
+  tidyr::pivot_wider(id_cols = feature,
+                     names_from = label_txt, values_from = pct_present) %>%
+  mutate(diff_pp = Sarcastic - `Not sarcastic`) %>%
+  arrange(desc(abs(diff_pp)))
+print(availability_table)
+
+# ============================================================
 # PART 2 — VISUALIZE SENTIMENT DISTRIBUTION & ANSWER "positive or negative?"
 # ============================================================
 
@@ -481,8 +553,15 @@ descriptive_density <- bind_rows(lapply(density_features, run_wilcox))
 descriptive_sparse <- bind_rows(lapply(names(sparse_raw_map), function(rf)
   run_prevalence_chisq(rf, sparse_raw_map[[rf]])))
 
-descriptive_density %>% arrange(p_value)
-descriptive_sparse %>% arrange(p_value)
+# Benjamini-Hochberg FDR correction — controls false positives across the
+# multiple feature tests (judge significance on p_adjusted, not raw p_value)
+descriptive_density <- descriptive_density %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "BH"))
+descriptive_sparse <- descriptive_sparse %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "BH"))
+
+descriptive_density %>% arrange(p_adjusted)
+descriptive_sparse %>% arrange(p_adjusted)
 
 # ============================================================
 # PART 3b — VISUALIZE ALL COMPARISONS
@@ -527,13 +606,13 @@ summary_table <- bind_rows(
   descriptive_density %>%
     transmute(feature, group_not_sarcastic = median_not_sarcastic,
               group_sarcastic = median_sarcastic, statistic = "median",
-              p_value, effect_size, test),
+              p_value, p_adjusted, effect_size, test),
   descriptive_sparse %>%
     transmute(feature, group_not_sarcastic = pct_not_sarcastic,
               group_sarcastic = pct_sarcastic, statistic = "% present",
-              p_value, effect_size, test)
+              p_value, p_adjusted, effect_size, test)
 ) %>%
-  arrange(p_value)
+  arrange(p_adjusted)
 
 summary_table
 
@@ -587,55 +666,163 @@ clogit_model <- clogit(
 summary(clogit_model)
 
 # ============================================================
-# PART 6 — RANK FEATURES BY DISCRIMINATING POWER
+# PART 6 — RANK FEATURES BY DISCRIMINATING POWER (inferential)
 # ============================================================
+# Ranked by standardized effect (odds ratio per 1 SD) from the main model,
+# with FDR-adjusted significance. This is an explanatory ranking — predictive
+# performance of the features is evaluated separately under RQ2.
 
-# Method 1: standardized coefficients from main model
 main_coefs <- summary(main_model)$coefficients
 feat_names <- c("caps_count","excl_count","ellipsis_count","interjection_count",
                 "emoticon_count","laughter_count","quote_count",
                 "intensifier_count","vader_comment","sentiment_diff","log_length")
 
-rank_coef <- tibble(
-  feature = feat_names,
-  abs_coef = abs(main_coefs[feat_names, "Estimate"]),
-  odds_ratio = exp(main_coefs[feat_names, "Estimate"]),
-  p_value = main_coefs[feat_names, "Pr(>|z|)"]
-) %>% arrange(desc(abs_coef))
-
-# Method 2: univariate AUC per feature (robust to collinearity)
-auc_features <- c(count_features, "log_length","vader_comment","sentiment_diff")
-
-auc_ranking <- sapply(auc_features, function(f) {
-  roc_obj <- roc(data$label, data[[f]], quiet = TRUE)
-  as.numeric(auc(roc_obj))
-})
-rank_auc <- tibble(feature = names(auc_ranking), auc = auc_ranking) %>% arrange(desc(auc))
-
-# Method 3: random forest variable importance
-rf_data <- data_scaled %>%
-  select(label, all_of(feat_names)) %>%
-  mutate(label = as.factor(label)) %>%
-  na.omit()
-
-rf_model <- randomForest(label ~ ., data = rf_data, importance = TRUE)
-rank_rf <- importance(rf_model, type = 1) %>%
-  as.data.frame() %>%
-  tibble::rownames_to_column("feature") %>%
-  arrange(desc(MeanDecreaseAccuracy))
-
-# ---- Combined ranking table ----
-final_ranking <- rank_coef %>%
-  select(feature, abs_coef, odds_ratio, p_value) %>%
-  left_join(rank_auc, by = "feature") %>%
-  left_join(rank_rf %>% select(feature, MeanDecreaseAccuracy), by = "feature") %>%
-  arrange(desc(abs_coef))
+final_ranking <- tibble(
+  feature    = feat_names,
+  odds_ratio = exp(main_coefs[feat_names, "Estimate"]),   # per 1 SD (scaled predictors)
+  abs_log_or = abs(main_coefs[feat_names, "Estimate"]),   # magnitude, for ranking
+  p_value    = main_coefs[feat_names, "Pr(>|z|)"]
+) %>%
+  mutate(p_adjusted = p.adjust(p_value, method = "BH")) %>%
+  arrange(desc(abs_log_or))
 
 final_ranking
 
 # ============================================================
-# PART 7 — DO THE TWO LABELED GROUPS FORM SEPARATE CLUSTERS?
-#PCA gives multiple axes regardless of class count, letting us
+# PART 6b — HYPOTHESIS SYNTHESIS (RQ1 VERDICT TABLE)
+# ============================================================
+# One row per PRE-SPECIFIED feature hypothesis. Compares the theory-expected
+# direction against the observed univariate (Part 3) and multivariate (Part 4)
+# evidence, with the paired model (Part 5) as a robustness flag. Verdict is
+# directional-confirmatory (Confirmed / Reversed / Not supported / Mixed);
+# Strength conveys magnitude separately. vader_comment (no directional
+# hypothesis) and log_length (control) are reported in Part 4 but not judged here.
+
+# 1. Pre-specified hypotheses: expected sign (+1 = more in sarcastic) + source
+hypotheses <- tribble(
+  ~feature,                ~model_term,          ~desc_row,            ~expected, ~source,
+  "Exclamation",           "excl_count",         "excl_ratio",          1, "Gonzalez-Ibanez 2011; Hutto 2014",
+  "Capitalization",        "caps_count",         "caps_ratio",          1, "Hutto 2014",
+  "Ellipsis",              "ellipsis_count",     "ellipsis_ratio",      1, "Gonzalez-Ibanez 2011",
+  "Interjections",         "interjection_count", "interjection_ratio",  1, "Kreuz & Caucci 2007",
+  "Intensifiers",          "intensifier_count",  "intensifier_ratio",   1, "Khodak 2018 (SARC)",
+  "Quotation marks",       "quote_count",        "quote_ratio",         1, "Gonzalez-Ibanez 2011",
+  "Emoticons",             "emoticon_count",     "emoticon_ratio",     -1, "Gonzalez-Ibanez 2011; SARC",
+  "Laughter",              "laughter_count",     "laughter_ratio",     -1, "Gonzalez-Ibanez 2011; SARC",
+  "Sentiment incongruity", "sentiment_diff",     "sentiment_diff",      1, "Riloff 2013; Joshi 2016"
+)
+
+# 2. Observed univariate evidence (effect size, FDR p, direction) from Part 3
+univ <- bind_rows(
+  descriptive_sparse  %>% transmute(desc_row = feature, u_effect = effect_size,
+                                    u_padj = p_adjusted,
+                                    u_dir = sign(pct_sarcastic - pct_not_sarcastic)),
+  descriptive_density %>% transmute(desc_row = feature, u_effect = effect_size,
+                                    u_padj = p_adjusted,
+                                    u_dir = sign(effect_size))
+)
+
+# 3. Model evidence: sign + FDR-adjusted p, for main (Part 4) and paired (Part 5)
+model_terms <- function(model, terms) {
+  co <- summary(model)$coefficients
+  tibble(model_term = terms, est = co[terms, 1], p = co[terms, ncol(co)])
+}
+mv <- model_terms(main_model,   hypotheses$model_term) %>%
+  transmute(model_term, OR = exp(est), mv_dir = sign(est), mv_padj = p.adjust(p, "BH"))
+pr <- model_terms(clogit_model, hypotheses$model_term) %>%
+  transmute(model_term, pr_dir = sign(est), pr_padj = p.adjust(p, "BH"))
+
+# 4. Assemble + derive verdict (confirmatory logic: direction + FDR significance)
+alpha <- 0.05
+rq1_verdict <- hypotheses %>%
+  left_join(univ, by = "desc_row") %>%
+  left_join(mv,   by = "model_term") %>%
+  left_join(pr,   by = "model_term") %>%
+  mutate(
+    verdict = case_when(
+      u_padj <  alpha & u_dir == -expected                      ~ "Reversed",
+      u_padj <  alpha & mv_padj < alpha & mv_dir == expected     ~ "Confirmed",
+      u_padj >= alpha                                            ~ "Not supported",
+      TRUE                                                       ~ "Mixed"
+    ),
+    strength = case_when(abs(u_effect) >= 0.10 ~ "moderate",
+                         abs(u_effect) >= 0.05 ~ "small",
+                         TRUE                  ~ "negligible"),
+    paired_robust = if_else(!is.na(pr_padj) & pr_padj < alpha & pr_dir == mv_dir,
+                            "yes", "no")
+  ) %>%
+  transmute(
+    Feature      = feature,
+    Expected     = if_else(expected > 0, "up sarcastic", "up non-sarcastic"),
+    Observed     = if_else(u_dir > 0, "up sarcastic", "up non-sarcastic"),
+    Effect_size  = round(abs(u_effect), 3),   # |Cramer's V| (sparse) / |rank-biserial| (density)
+    Strength     = strength,
+    Univ_padj    = signif(u_padj, 2),
+    OR_per_SD    = round(OR, 3),
+    Multi_padj   = signif(mv_padj, 2),
+    Paired_robust = paired_robust,
+    Verdict      = verdict,
+    Source       = source
+  ) %>%
+  arrange(desc(Effect_size))
+
+rq1_verdict
+
+# ============================================================
+# PART 7 — SUPPLEMENTARY (EXPLORATORY): DO THE GROUPS SEPARATE?
+# ============================================================
+# Descriptive separability check only — NOT a predictive claim.
+# LDA finds the single best linear combination of the 11 features; if the two
+# groups separated cleanly their projected scores would show little overlap.
+# Heavy overlap here reinforces that the features are individually weak.
+
+library(MASS)
+
+# NOTE: MASS defines its own select() which silently overrides dplyr::select()
+# for the REST OF THIS R SESSION, not just this script — if you later re-run
+# an earlier script (e.g. clean_sarcasm_data.R) in the same session, its
+# plain select() calls will break too with an "unused arguments" error.
+# Restoring dplyr's version here prevents that regardless of run order.
+select <- dplyr::select
+
+lda_input <- data_scaled %>%
+  select(label, all_of(feat_names)) %>%
+  na.omit()
+
+lda_model <- lda(factor(label) ~ ., data = lda_input)
+lda_scores <- predict(lda_model)$x[, 1]
+
+lda_plot_data <- tibble(
+  LD1 = lda_scores,
+  label_txt = factor(lda_input$label, labels = c("Not sarcastic","Sarcastic"))
+)
+
+# Simple, direct answer: do the two distributions separate or overlap?
+ggplot(lda_plot_data, aes(x = LD1, fill = label_txt)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Are sarcastic and non-sarcastic comments separate clusters?",
+       subtitle = "Best-case linear separation using all 11 features",
+       x = "Discriminant score", y = "Density", fill = NULL) +
+  theme_minimal()
+
+# Same result, shown as actual data points rather than a smoothed curve —
+# note LDA with 2 classes only ever produces ONE axis (classes - 1), so
+# points are jittered vertically just to avoid overplotting, not because
+# there's a second real dimension.
+lda_plot_sample <- lda_plot_data %>% slice_sample(n = min(5000, nrow(lda_plot_data)))
+
+ggplot(lda_plot_sample, aes(x = LD1, y = label_txt, color = label_txt)) +
+  geom_jitter(height = 0.2, alpha = 0.3, size = 1) +
+  labs(title = "Individual comments along the discriminant axis (5,000-point sample)",
+       x = "Discriminant score", y = NULL, color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# ============================================================
+# PART 7b — 2D SCATTER PLOT (PCA) — actual point clusters in 2 dimensions
+# ============================================================
+# LDA only gives ONE axis with 2 classes, so it can't produce a true 2D
+# scatter. PCA gives multiple axes regardless of class count, letting us
 # plot PC1 vs PC2 as an actual 2D point cloud, colored by label afterward.
 # NOTE: PCA doesn't use the label when computing these axes — it's an
 # exploratory look at feature-space structure, not a supervised result.
