@@ -1,8 +1,13 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
 # RQ1 — What features distinguish sarcastic from non-sarcastic comments?
 
 **Design:** confirmatory / inferential. We test *theory-derived* linguistic features against a pre-specified directional hypothesis each, and report **effect sizes** (not just p-values) because at ~45k observations almost everything is "significant."
 
-**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (~50k comments, ~50/50 balanced).** Only the multivariate model (Step 4) restricts subreddits — to the top 30 by volume — as a control, purely for estimation stability.
+**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (~50k comments, ~50/50 balanced).** The multivariate model (Step 4) additionally controls for subreddit as a fixed effect — the top-30 subreddits individually, the remainder pooled into an `"Other"` level for estimation stability — still on the full corpus.
 
 ---
 
@@ -80,7 +85,7 @@ Both tables are **FDR-corrected** (Benjamini–Hochberg) to control false positi
 
 ## Step 4 — Multivariate logistic regression
 
-*Why:* a univariate difference may be a confound (e.g. sarcastic *subreddits* are shouty). So we fit one logistic model with **all features + comment length + subreddit fixed effects** (subreddit restricted to the **top 30 by volume** so each dummy has enough data to be stable), predictors standardized → coefficients are comparable **odds ratios per 1 SD**. Correlation matrix (max ρ = 0.31) and VIF ≈ 1 confirmed no multicollinearity, so all features were kept.
+*Why:* a univariate difference may be a confound (e.g. sarcastic *subreddits* are shouty). So we fit one logistic model with **all features + comment length + subreddit fixed effects**, on the **full corpus** — the top-30 subreddits keep their own dummy and the long tail is pooled into an `"Other"` level, which stabilises the control without dropping any rows. Predictors are standardized → coefficients are comparable **odds ratios per 1 SD**. Correlation matrix (max ρ = 0.31) and VIF ≈ 1 confirmed no multicollinearity, so all features were kept.
 
 *Specification:* `logit P(sarcastic) = β₀ + Σₖ βₖ·featureₖ + β_len·log_length + subreddit fixed effects`.
 

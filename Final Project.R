@@ -627,7 +627,10 @@ data_scaled <- data %>%
   mutate(across(all_of(c(count_features, "log_length","vader_comment","sentiment_diff")),
                 ~ as.numeric(scale(.))))
 
-# Restrict subreddit dummies to top N for tractability
+# Keep the full corpus but stabilise subreddit control: the top-30 subreddits
+# keep their own dummy; the long tail is pooled into "Other". This avoids
+# unstable tiny-subreddit dummies WITHOUT dropping any rows, so the model is
+# estimated on the same full sample as the univariate/paired analyses.
 top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
 
 main_model <- glm(
@@ -635,7 +638,8 @@ main_model <- glm(
     emoticon_count + laughter_count + quote_count +
     intensifier_count + vader_comment + sentiment_diff +
     log_length + factor(subreddit),
-  data = data_scaled %>% filter(subreddit %in% top_subs),
+  data = data_scaled %>%
+    mutate(subreddit = if_else(subreddit %in% top_subs, subreddit, "Other")),
   family = binomial
 )
 
@@ -883,7 +887,14 @@ reticulate::use_condaenv("textrpp_condaenv", required = TRUE)
 sentence_transformers <- import("sentence_transformers")
 embed_model <- sentence_transformers$SentenceTransformer("microsoft/harrier-oss-v1-270m")
 
-get_embeddings <- function(texts, batch_size = 32L) {
+# Cap sequence length: a few very long comments blow up MPS memory (attention
+# cost grows with length^2). 256 tokens comfortably covers Reddit comments +
+# their parent context; longer inputs are truncated.
+embed_model$max_seq_length <- 256L
+
+# Smaller batch keeps peak GPU memory well under the MPS limit (32 caused an
+# out-of-memory error). Lower further to 4 if OOM persists.
+get_embeddings <- function(texts, batch_size = 8L) {
   embed_model$encode(texts, batch_size = as.integer(batch_size), show_progress_bar = TRUE)
 }
 
@@ -959,6 +970,12 @@ scale_with_train_stats <- function(df) {
 
 features_scaled <- scale_with_train_stats(data)
 
+# Mean-impute any NA (mainly sentiment_diff, where the parent comment could not
+# be VADER-scored). After train-scaling, 0 == the training mean, so this is a
+# neutral imputation and keeps every row (glmnet rejects NAs outright).
+cat("NA cells imputed in hand-crafted features:", sum(is.na(features_scaled)), "\n")
+features_scaled[is.na(features_scaled)] <- 0
+
 # ---- Model 1 input: embeddings only ----
 X_emb <- as.matrix(embeddings)
 
@@ -1000,10 +1017,16 @@ model2_pred_prob <- predict(model2, newx = X_combined_test, s = "lambda.min", ty
 # original fit used the full dataset for inference, which isn't a fair
 # comparison point until it's evaluated out-of-sample like the others.
 
+# Pool subreddits (top-30 individually, the rest as "Other") — the same control
+# as RQ1 Part 4. Every subreddit maps to a known level, so NO test rows are
+# dropped: the RQ1 model is evaluated on the FULL test set, exactly like Model 1
+# and Model 2 → all three models are compared on the same comments.
 top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
+pool_sub <- function(df) df %>%
+  mutate(subreddit = if_else(subreddit %in% top_subs, subreddit, "Other"))
 
-rq1_train <- data[train_idx, ] %>% filter(subreddit %in% top_subs)
-rq1_test  <- data[test_idx, ]  %>% filter(subreddit %in% top_subs)
+rq1_train <- pool_sub(data[train_idx, ])
+rq1_test  <- pool_sub(data[test_idx, ])
 
 rq1_model_refit <- glm(
   label ~ caps_count + excl_count + ellipsis_count + interjection_count +
@@ -1013,9 +1036,6 @@ rq1_model_refit <- glm(
   data = rq1_train,
   family = binomial
 )
-
-# subreddits present in test but not train would break prediction — drop them
-rq1_test <- rq1_test %>% filter(subreddit %in% unique(rq1_train$subreddit))
 
 rq1_pred_prob <- predict(rq1_model_refit, newdata = rq1_test, type = "response")
 rq1_actual    <- rq1_test$label
@@ -1053,6 +1073,58 @@ results <- bind_rows(
 results
 
 # ============================================================
+# PART 7b — REPEATED-SPLIT ROBUSTNESS (Model 1 vs Model 2)
+# ============================================================
+# Why: the Model 2 gain over Model 1 is small, so we repeat the leakage-safe
+# split -> fit -> evaluate over 10 seeds to confirm it holds across partitions
+# rather than being one-split noise (Session 4: single splits are noisy; report
+# performance across folds as mean +/- SD).
+
+run_one_split <- function(seed) {
+  set.seed(seed)
+  tr_parents <- sample(unique_parents, floor(0.8 * length(unique_parents)))
+  tr <- which(data$parent_comment %in% tr_parents)
+  te <- setdiff(seq_len(nrow(data)), tr)
+
+  # scale hand-crafted features with THIS split's train stats (no leakage)
+  tm <- sapply(data[tr, feat_names], mean, na.rm = TRUE)
+  ts <- sapply(data[tr, feat_names], sd,   na.rm = TRUE)
+  fs <- sweep(sweep(as.matrix(data[, feat_names]), 2, tm, "-"), 2, ts, "/")
+  fs[is.na(fs)] <- 0
+  Xc <- cbind(X_emb, fs)
+
+  m1 <- cv.glmnet(X_emb[tr, ], y[tr], family = "binomial", alpha = 0)
+  m2 <- cv.glmnet(Xc[tr, ],    y[tr], family = "binomial", alpha = 0)
+  p1 <- predict(m1, X_emb[te, ], s = "lambda.min", type = "response")[, 1]
+  p2 <- predict(m2, Xc[te, ],    s = "lambda.min", type = "response")[, 1]
+
+  bind_rows(
+    evaluate_model(p1, y[te], model_name = "Model 1: embeddings only"),
+    evaluate_model(p2, y[te], model_name = "Model 2: embeddings + features")
+  ) %>% mutate(seed = seed)
+}
+
+seeds <- 1:10
+multi <- bind_rows(lapply(seeds, run_one_split))
+
+# mean +/- SD per model across the 10 splits
+multi_summary <- multi %>% group_by(model) %>%
+  summarise(f1_mean = mean(f1), f1_sd = sd(f1),
+            auc_mean = mean(auc), auc_sd = sd(auc), .groups = "drop")
+multi_summary
+
+# paired improvement (Model 2 - Model 1) and how often Model 2 wins
+m1v <- multi %>% filter(model == "Model 1: embeddings only")       %>% arrange(seed)
+m2v <- multi %>% filter(model == "Model 2: embeddings + features") %>% arrange(seed)
+robustness_summary <- tibble(
+  mean_delta_f1  = mean(m2v$f1  - m1v$f1),
+  sd_delta_f1    = sd(m2v$f1  - m1v$f1),
+  mean_delta_auc = mean(m2v$auc - m1v$auc),
+  win_rate_f1    = mean((m2v$f1 - m1v$f1) > 0)
+)
+robustness_summary
+
+# ============================================================
 # PART 8 (OPTIONAL) — GRADIENT BOOSTING ROBUSTNESS CHECK
 # ============================================================
 # Checks whether the embeddings-vs-embeddings+features conclusion holds
@@ -1060,18 +1132,31 @@ results
 
 library(xgboost)
 
-dtrain_m1 <- xgb.DMatrix(data = X_emb_train, label = y_train)
-dtest_m1  <- xgb.DMatrix(data = X_emb_test, label = y_test)
+# Leakage-safe early stopping: carve a validation fold out of TRAIN and watch
+# THAT for early stopping. The test set is touched only for final prediction —
+# watching it (as before) would tune the stopping round on the test data and
+# inflate the reported metrics.
+set.seed(1)
+n_tr     <- length(y_train)
+val_rows <- sample(n_tr, size = floor(0.2 * n_tr))
+sub_rows <- setdiff(seq_len(n_tr), val_rows)
 
-dtrain_m2 <- xgb.DMatrix(data = X_combined_train, label = y_train)
-dtest_m2  <- xgb.DMatrix(data = X_combined_test, label = y_test)
+# Model 1 (embeddings only)
+dsub_m1  <- xgb.DMatrix(data = X_emb_train[sub_rows, ], label = y_train[sub_rows])
+dval_m1  <- xgb.DMatrix(data = X_emb_train[val_rows, ], label = y_train[val_rows])
+dtest_m1 <- xgb.DMatrix(data = X_emb_test, label = y_test)
+
+# Model 2 (embeddings + features)
+dsub_m2  <- xgb.DMatrix(data = X_combined_train[sub_rows, ], label = y_train[sub_rows])
+dval_m2  <- xgb.DMatrix(data = X_combined_train[val_rows, ], label = y_train[val_rows])
+dtest_m2 <- xgb.DMatrix(data = X_combined_test, label = y_test)
 
 xgb_params <- list(objective = "binary:logistic", eval_metric = "logloss", max_depth = 6, eta = 0.1)
 
-xgb_model1 <- xgb.train(xgb_params, dtrain_m1, nrounds = 200,
-                        watchlist = list(test = dtest_m1), early_stopping_rounds = 15, verbose = 0)
-xgb_model2 <- xgb.train(xgb_params, dtrain_m2, nrounds = 200,
-                        watchlist = list(test = dtest_m2), early_stopping_rounds = 15, verbose = 0)
+xgb_model1 <- xgb.train(xgb_params, dsub_m1, nrounds = 200,
+                        watchlist = list(val = dval_m1), early_stopping_rounds = 15, verbose = 0)
+xgb_model2 <- xgb.train(xgb_params, dsub_m2, nrounds = 200,
+                        watchlist = list(val = dval_m2), early_stopping_rounds = 15, verbose = 0)
 
 xgb_pred1 <- predict(xgb_model1, dtest_m1)
 xgb_pred2 <- predict(xgb_model2, dtest_m2)
@@ -1115,13 +1200,10 @@ compare_models_mcnemar <- function(pred_prob_a, actual_a, pred_prob_b, actual_b,
   )
 }
 
-# NOTE: Model 1/Model 2 share y_test exactly. The RQ1 model's test set
-# (rq1_test) was filtered further (dropped unseen subreddits), so restrict
-# Model 1/Model 2's predictions to that same row subset before comparing
-# against the RQ1 model — otherwise the pairing isn't valid.
-
-rq1_comparable_idx <- which(data[test_idx, ]$subreddit %in% unique(rq1_train$subreddit) &
-                              data[test_idx, ]$subreddit %in% top_subs)
+# With subreddit pooling ("Other"), the RQ1 model now predicts on the FULL
+# test set — the same rows, in the same order, as Model 1 and Model 2. So every
+# test comment is comparable across all three models; no subsetting is needed.
+rq1_comparable_idx <- seq_along(y_test)
 
 mcnemar_results <- bind_rows(
   compare_models_mcnemar(model1_pred_prob, y_test, model2_pred_prob, y_test,
@@ -1244,3 +1326,7 @@ cat("\nPerformance metrics (ranked by F1):\n")
 print(metrics_table)
 cat("\nPairwise significance (McNemar's test, paired on shared test comments):\n")
 print(significance_table)
+
+cat("\nCross-split robustness (Model 1 vs Model 2, 10 leakage-safe splits):\n")
+print(multi_summary)          # F1/AUC mean +/- SD per model across splits
+print(robustness_summary)     # mean delta + win-rate: how consistently Model 2 wins
