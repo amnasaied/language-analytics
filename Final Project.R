@@ -1330,3 +1330,593 @@ print(significance_table)
 cat("\nCross-split robustness (Model 1 vs Model 2, 10 leakage-safe splits):\n")
 print(multi_summary)          # F1/AUC mean +/- SD per model across splits
 print(robustness_summary)     # mean delta + win-rate: how consistently Model 2 wins
+
+# ============================================================
+# RQ3: Do sarcastic comments receive higher scores (public approval)
+#      than non-sarcastic ones?
+#
+# Input: cleaned `data` object with the 11 RQ1 features already computed
+#        (comment_len, etc.), plus the original SARC columns (score,
+#        created_utc, author, subreddit, parent_comment, label)
+# ============================================================
+
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+library(boot)
+library(lme4)
+library(lmerTest)   # adds Satterthwaite p-values (Pr(>|t|)) to lmer summaries;
+                    # base lme4 gives only t-values, so Steps 9 & the summary
+                    # would otherwise fail indexing the "Pr(>|t|)" column
+
+select <- dplyr::select   # guard against MASS::select masking from other scripts
+
+set.seed(1)
+
+# ============================================================
+# STEP 1 — CLEAN THE SCORE COLUMN
+# ============================================================
+
+# ---- 1.1 Check type and structure ----
+class(data$score)
+str(data$score)
+
+# Coerce to numeric if it came in as character (can happen after a CSV read
+# if any row had a parsing hiccup — coercion will turn those into NA, which
+# 1.2 then catches explicitly rather than silently)
+data <- data %>% mutate(score = as.numeric(score))
+
+# ---- 1.2 Check missingness ----
+sum(is.na(data$score))
+mean(is.na(data$score)) * 100
+data <- data %>% filter(!is.na(score))
+
+# ---- 1.3 Check for non-integer or nonsensical values ----
+# Reddit scores should be whole numbers (net upvotes). Flag anything that
+# isn't, since a non-integer value suggests a parsing/data issue rather than
+# a real score.
+sum(data$score != round(data$score))
+data <- data %>% filter(score == round(data$score))
+
+# ---- 1.4 Inspect the distribution before deciding on outlier handling ----
+summary(data$score)
+quantile(data$score, probs = c(.001, .01, .05, .25, .5, .75, .95, .99, .999))
+
+# NOTE: deliberately NOT trimming outliers here. High-score comments are
+# genuine, meaningful data (virality is part of what "public approval"
+# means), not measurement error — and the planned analysis (medians,
+# Wilcoxon tests, signed log transform) is already robust to extreme
+# values without needing to discard them.
+
+# ---- 1.5 Duplicate check specific to score-bearing rows ----
+# Full comment-level duplicates were already removed during initial
+# cleaning (clean_sarcasm_data.R) — this just confirms that held for the
+# rows going into RQ3 specifically, in case `data` has been re-filtered
+# since then (e.g., by RQ1's feature-engineering steps).
+nrow(data) - n_distinct(data$comment, data$parent_comment)
+
+# ---- 1.6 Visual check ----
+ggplot(data, aes(x = score)) +
+  geom_histogram(binwidth = 1, fill = "darkgreen", color = "white") +
+  coord_cartesian(xlim = c(-10, 30)) +
+  labs(title = "Score distribution after cleaning (trimmed for display)",
+       x = "Score", y = "Number of comments") +
+  theme_minimal()
+
+cat("Rows after score cleaning:", nrow(data), "\n")
+cat("Score range:", min(data$score), "to", max(data$score), "\n")
+
+# ============================================================
+# STEP 2 — CLEAN THE TIME COLUMN (created_utc)
+# ============================================================
+# The original SARC csv includes `created_utc` (Unix epoch seconds) —
+# this is the precise per-comment timestamp needed to control for posting
+# time. The `date` column (year-month string) is too coarse for this.
+
+if (!"created_utc" %in% names(data)) {
+  stop("`created_utc` not found in `data`. Check names(data) — if it was ",
+       "dropped earlier, you'll need to re-derive it from the original ",
+       "SARC csv (it's a raw column, not something computed in cleaning).")
+}
+
+# ---- 2.1 Check type, coerce if needed ----
+class(data$created_utc)
+data <- data %>% mutate(created_utc = as.numeric(created_utc))
+
+# ---- 2.2 Check missingness ----
+sum(is.na(data$created_utc))
+mean(is.na(data$created_utc)) * 100
+data <- data %>% filter(!is.na(created_utc))
+
+# ---- 2.3 Check for implausible values ----
+# Reddit launched in 2005 (epoch ~1,120,000,000) and this dataset was
+# collected no later than ~2017 (epoch ~1,500,000,000) — anything well
+# outside that range signals a parsing error, not a real timestamp.
+summary(data$created_utc)
+range_lower <- as.numeric(as.POSIXct("2005-01-01", tz = "UTC"))
+range_upper <- as.numeric(as.POSIXct("2018-01-01", tz = "UTC"))
+
+n_out_of_range <- sum(data$created_utc < range_lower | data$created_utc > range_upper)
+cat("Rows with implausible created_utc:", n_out_of_range,
+    "(", round(100 * n_out_of_range / nrow(data), 3), "% )\n")
+
+data <- data %>% filter(created_utc >= range_lower, created_utc <= range_upper)
+
+# ---- 2.4 Visual sanity check — should show a smooth, plausible time range ----
+ggplot(data, aes(x = as.POSIXct(created_utc, origin = "1970-01-01", tz = "UTC"))) +
+  geom_histogram(bins = 50, fill = "steelblue", color = "white") +
+  labs(title = "Distribution of comment posting times (after cleaning)",
+       x = "Posting date", y = "Number of comments") +
+  theme_minimal()
+
+# ---- 2.5 Rescale for regression stability ----
+# Raw Unix timestamps are huge numbers (~1.4 billion), which can cause
+# convergence issues in lmer. Standardizing doesn't change significance/
+# direction, just numerical stability.
+data <- data %>% mutate(time_scaled = as.numeric(scale(created_utc)))
+
+# ============================================================
+# STEP 3 — CLEAN THE OTHER CONTROL VARIABLES
+# ============================================================
+
+# ---- 3.1 comment_len ----
+sum(is.na(data$comment_len))
+sum(data$comment_len == 0)   # should be 0 — earlier cleaning removed empty comments
+summary(data$comment_len)
+# No further action needed if the above look clean — comment_len was
+# already validated during RQ1's feature engineering. Re-checked here only
+# because it's about to enter a regression as a covariate.
+
+# ---- 3.2 subreddit ----
+sum(is.na(data$subreddit))
+sum(str_trim(data$subreddit) == "")
+n_distinct(data$subreddit)
+
+# Check for near-duplicate labels from inconsistent casing (e.g. "PS4" vs
+# "ps4") that would otherwise split what should be one subreddit's fixed
+# effect into two smaller, noisier ones
+case_check <- data %>%
+  distinct(subreddit) %>%
+  mutate(subreddit_lower = str_to_lower(subreddit)) %>%
+  count(subreddit_lower) %>%
+  filter(n > 1)
+case_check   # non-empty result = casing inconsistency to fix before pooling
+
+# ---- 3.3 author — the important one ----
+# Reddit records a deleted account's comments with the literal string
+# "[deleted]" as the author. If left as-is, the (1 | author) random effect
+# would incorrectly treat potentially thousands of DIFFERENT people's
+# comments as coming from ONE single "author" — badly distorting the
+# random-effect estimate and, by extension, every other coefficient in the
+# model. This must be fixed before fitting, not just noted afterward.
+
+sum(is.na(data$author))
+sum(data$author == "[deleted]", na.rm = TRUE)
+mean(data$author == "[deleted]", na.rm = TRUE) * 100
+
+# Give every "[deleted]" row its own unique pseudo-author ID, so the random
+# effect treats each as a distinct (if unobserved) individual rather than
+# pooling them into one fictitious "super-author"
+data <- data %>%
+  mutate(
+    author = if_else(
+      author == "[deleted]" | is.na(author) | str_trim(author) == "",
+      paste0("deleted_", row_number()),
+      author
+    )
+  )
+
+# Confirm the fix worked — should show many singleton "deleted_*" authors now
+data %>% filter(str_detect(author, "^deleted_")) %>% count(author) %>% summary()
+
+# ---- 3.4 label ----
+table(data$label)   # should be clean 0/1 — quick re-check before regression
+
+# ============================================================
+# STEP 4 — DESCRIPTIVE COMPARISON + UNPAIRED SIGNIFICANCE TEST
+# ============================================================
+# Wilcoxon rank-sum (not t-test): score is heavily right-skewed with
+# possible negative values — a t-test's mean-comparison and normality
+# assumption would be badly violated here.
+
+data %>%
+  group_by(label) %>%
+  summarise(median_score = median(score), IQR_score = IQR(score), n = n())
+
+ggplot(data, aes(x = factor(label, labels = c("Not sarcastic","Sarcastic")),
+                 y = score, fill = factor(label))) +
+  geom_boxplot(outlier.alpha = 0.1) +
+  coord_cartesian(ylim = quantile(data$score, c(.01, .99))) +
+  labs(title = "Score by label (1st-99th percentile view)", x = NULL, y = "Score") +
+  theme_minimal() + theme(legend.position = "none")
+
+wt_unpaired <- wilcox.test(score ~ label, data = data, conf.int = TRUE)
+wt_unpaired
+
+# Effect size: rank-biserial correlation — needed because with this sample
+# size, the p-value alone will almost certainly be "significant" regardless
+# of whether the difference is practically meaningful
+n1 <- sum(data$label == 0); n2 <- sum(data$label == 1)
+r_rb_unpaired <- 1 - (2 * wt_unpaired$statistic) / (n1 * n2)
+r_rb_unpaired
+
+# ============================================================
+# STEP 5 — PAIRED WILCOXON SIGNED-RANK TEST (primary evidence)
+# ============================================================
+# Structurally controls for subreddit/thread/topic — both replies in a
+# pair share the same parent_comment, so anything constant within the
+# thread cancels out automatically, without needing to model it.
+
+paired_data <- data %>%
+  group_by(parent_comment) %>%
+  filter(n_distinct(label) == 2, n() == 2) %>%
+  ungroup()
+
+nrow(paired_data)
+n_distinct(paired_data$parent_comment)
+
+paired_wide <- paired_data %>%
+  select(parent_comment, label, score) %>%
+  pivot_wider(names_from = label, values_from = score, names_prefix = "score_")
+
+# score_1 = sarcastic reply's score, score_0 = non-sarcastic reply's score
+wt_paired <- wilcox.test(paired_wide$score_1, paired_wide$score_0,
+                         paired = TRUE, conf.int = TRUE)
+wt_paired
+
+# ============================================================
+# STEP 6 — BOOTSTRAP CONFIDENCE INTERVAL ON THE PAIRED DIFFERENCE
+# ============================================================
+# Resample by parent_comment (pair), not by individual row — gives a
+# concrete, interpretable magnitude alongside the signed-rank test's p-value.
+
+paired_wide <- paired_wide %>% mutate(diff = score_1 - score_0)
+
+median_diff_fn <- function(d, indices) median(d$diff[indices])
+
+boot_out <- boot(paired_wide, median_diff_fn, R = 2000)
+boot.ci(boot_out, type = "perc")
+
+median(paired_wide$diff)   # point estimate to report alongside the CI
+
+# ============================================================
+# STEP 7 — FULL-SAMPLE MIXED-EFFECTS REGRESSION
+# ============================================================
+# Controls for length, subreddit, POSTING TIME, and author tendencies
+# simultaneously, using the full dataset (not just matched pairs) for
+# maximum power. This is a statistical (not structural) confound control —
+# complementary to, not a replacement for, the paired test above.
+
+# Signed log transform: tames the skew while preserving direction
+# (positive = approval, negative = disapproval) — your stated focus.
+data <- data %>%
+  mutate(score_transformed = sign(score) * log1p(abs(score)))
+
+# Pool rare subreddits to avoid unstable fixed-effect levels, consistent
+# with the same approach used in RQ1/RQ2
+top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
+data <- data %>% mutate(subreddit_pooled = if_else(subreddit %in% top_subs, subreddit, "Other"))
+
+rq3_model <- lmer(
+  score_transformed ~ label + comment_len + subreddit_pooled + time_scaled + (1 | author),
+  data = data
+)
+
+summary(rq3_model)
+
+# Confidence intervals on the fixed effects (label is the coefficient of interest)
+rq3_ci <- confint(rq3_model, parm = "beta_", method = "Wald")
+
+# ============================================================
+# STEP 7b — SHOULD comment_len / time_scaled BE NONLINEAR?
+# ============================================================
+# Don't assume a straight-line relationship just because it's convenient —
+# check it. Fit quadratic alternatives and compare via likelihood ratio
+# test (anova) and AIC; only keep the nonlinear term if it's a genuine,
+# meaningful improvement — a linear term is much easier to interpret and
+# report, so it should be the default unless the data clearly needs more.
+
+rq3_model_quad_len <- lmer(
+  score_transformed ~ label + poly(comment_len, 2) + subreddit_pooled + time_scaled + (1 | author),
+  data = data
+)
+
+rq3_model_quad_time <- lmer(
+  score_transformed ~ label + comment_len + subreddit_pooled + poly(time_scaled, 2) + (1 | author),
+  data = data
+)
+
+# Likelihood ratio test: is the added polynomial term worth its extra complexity?
+anova(rq3_model, rq3_model_quad_len)    # tests comment_len linear vs. quadratic
+anova(rq3_model, rq3_model_quad_time)   # tests time_scaled linear vs. quadratic
+
+# AIC comparison (lower = better fit-vs-complexity tradeoff)
+AIC(rq3_model, rq3_model_quad_len, rq3_model_quad_time)
+
+# ---- Decision rule ----
+# If a likelihood ratio test comes back significant (p < .05) AND the AIC
+# drop is more than a couple of points, switch that term to poly(x, 2) in
+# the final model below. Otherwise, keep it linear — simplicity wins on a
+# tie, since a linear coefficient is far easier to report and interpret
+# than a polynomial one.
+
+# ============================================================
+# STEP 8 — INSIGHTFUL VISUALIZATIONS
+# ============================================================
+
+# ---- 8.1 Paired score comparison: sarcastic vs. non-sarcastic, point by point ----
+# Each point is one matched pair. Points above the diagonal = the sarcastic
+# reply scored higher than its non-sarcastic pair partner; below = lower.
+# This is the most direct visual of your primary (paired) evidence.
+score_limits <- quantile(c(paired_wide$score_0, paired_wide$score_1), c(.01, .99))
+
+ggplot(paired_wide, aes(x = score_0, y = score_1)) +
+  geom_point(alpha = 0.3, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  coord_cartesian(xlim = score_limits, ylim = score_limits) +
+  labs(title = "Paired comparison: sarcastic vs. non-sarcastic reply score",
+       subtitle = "Each point = one matched pair sharing the same parent comment. Above the line = sarcastic scored higher.",
+       x = "Non-sarcastic reply score", y = "Sarcastic reply score") +
+  theme_minimal()
+
+# ---- 8.2 Distribution of within-pair differences ----
+# Directly visualizes what the signed-rank test is testing: is this
+# distribution shifted away from zero, and in which direction?
+ggplot(paired_wide, aes(x = diff)) +
+  geom_histogram(binwidth = 1, fill = "darkorange", color = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
+  geom_vline(xintercept = median(paired_wide$diff), color = "red", linewidth = 0.8) +
+  coord_cartesian(xlim = quantile(paired_wide$diff, c(.01, .99))) +
+  labs(title = "Within-pair score difference (sarcastic − non-sarcastic)",
+       subtitle = "Red line = median difference. Dashed line = zero (no difference).",
+       x = "Score difference", y = "Number of pairs") +
+  theme_minimal()
+
+# ---- 8.3 Bootstrap sampling distribution, with CI marked ----
+# Shows the uncertainty behind the point estimate in Step 6, rather than
+# just reporting the interval as two numbers.
+boot_ci <- boot.ci(boot_out, type = "perc")
+ci_lower <- boot_ci$percent[4]
+ci_upper <- boot_ci$percent[5]
+
+ggplot(tibble(boot_median = boot_out$t[, 1]), aes(x = boot_median)) +
+  geom_histogram(bins = 40, fill = "seagreen", color = "white") +
+  geom_vline(xintercept = c(ci_lower, ci_upper), color = "red", linetype = "dashed") +
+  geom_vline(xintercept = median(paired_wide$diff), color = "black") +
+  labs(title = "Bootstrap distribution of the median paired difference",
+       subtitle = "Red dashed lines = 95% CI. Black line = observed median.",
+       x = "Bootstrapped median difference", y = "Count (of 2,000 resamples)") +
+  theme_minimal()
+
+# ---- 8.4 Regression coefficient forest plot ----
+# Visualizes the fixed effects of interest (excluding the many subreddit
+# dummies, which would clutter the plot) with their confidence intervals.
+coef_of_interest <- c("label", "comment_len", "time_scaled")
+
+forest_data <- tibble(
+  term = coef_of_interest,
+  estimate = fixef(rq3_model)[coef_of_interest],
+  conf.low = rq3_ci[coef_of_interest, 1],
+  conf.high = rq3_ci[coef_of_interest, 2]
+)
+
+ggplot(forest_data, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high), color = "steelblue", linewidth = 0.8) +
+  labs(title = "Regression coefficients (95% CI)",
+       subtitle = "Outcome: signed-log score. Interval crossing zero = not significant.",
+       x = "Estimate (signed-log score units)", y = NULL) +
+  theme_minimal()
+
+# ---- 8.5 Does the sarcasm-score relationship hold consistently over time? ----
+# Contextualizes the time control: a smoothed trend of score by posting
+# date, split by label. Diverging or converging lines over time would be
+# a reason to treat sarcasm's effect as time-dependent rather than constant.
+data_sample <- data %>% slice_sample(n = min(20000, nrow(data)))  # subsample for smoothing speed
+
+ggplot(data_sample, aes(x = as.POSIXct(created_utc, origin = "1970-01-01", tz = "UTC"),
+                        y = score_transformed, color = factor(label, labels = c("Not sarcastic","Sarcastic")))) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(title = "Score trend over time, by sarcasm label",
+       subtitle = "Signed-log score, loess-smoothed (20,000-row sample for speed)",
+       x = "Posting date", y = "Signed-log score", color = NULL) +
+  theme_minimal()
+
+# ---- 8.6 Score vs. comment length, by label ----
+# Contextualizes the length control — shows whether longer comments score
+# differently, and whether that pattern differs by sarcasm label.
+ggplot(data_sample, aes(x = comment_len, y = score_transformed,
+                        color = factor(label, labels = c("Not sarcastic","Sarcastic")))) +
+  geom_smooth(method = "loess", se = TRUE) +
+  coord_cartesian(xlim = c(0, quantile(data$comment_len, .95))) +
+  labs(title = "Score vs. comment length, by sarcasm label",
+       x = "Comment length (words)", y = "Signed-log score", color = NULL) +
+  theme_minimal()
+
+# ============================================================
+# STEP 9 — COMPARISON TABLES & VISUALIZATIONS ACROSS METHODS
+# ============================================================
+# Brings the unpaired test, paired test, and regression together so their
+# agreement (or disagreement) is easy to read at a glance, rather than
+# scattered across separate cat() blocks.
+
+# ---- 9.1 Wilcoxon comparison table ----
+# Both wilcox.test() calls return a Hodges-Lehmann pseudo-median estimate
+# and CI in the SAME raw score units, so unpaired and paired are directly
+# comparable here — unlike the regression, which is on a signed-log scale.
+
+wilcoxon_comparison <- tibble(
+  method = c("Unpaired (rank-sum)", "Paired (signed-rank)"),
+  n = c(nrow(data), nrow(paired_wide)),
+  estimate = c(wt_unpaired$estimate, wt_paired$estimate),
+  conf_low = c(wt_unpaired$conf.int[1], wt_paired$conf.int[1]),
+  conf_high = c(wt_unpaired$conf.int[2], wt_paired$conf.int[2]),
+  p_value = c(wt_unpaired$p.value, wt_paired$p.value),
+  effect_size_rank_biserial = c(r_rb_unpaired, NA)   # paired effect size added below
+)
+
+# Matched rank-biserial effect size for the paired test (uses Z from V statistic)
+z_paired <- qnorm(wt_paired$p.value / 2, lower.tail = FALSE) * sign(wt_paired$estimate)
+r_rb_paired <- z_paired / sqrt(nrow(paired_wide))
+wilcoxon_comparison$effect_size_rank_biserial[2] <- r_rb_paired
+
+wilcoxon_comparison <- wilcoxon_comparison %>%
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+wilcoxon_comparison
+
+# ---- 9.2 Forest plot: unpaired vs. paired estimate, same units, side by side ----
+ggplot(wilcoxon_comparison, aes(x = estimate, y = method)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_pointrange(aes(xmin = conf_low, xmax = conf_high), color = "darkorange", linewidth = 0.9) +
+  labs(title = "Score difference (sarcastic − non-sarcastic): unpaired vs. paired",
+       subtitle = "Hodges-Lehmann estimate with 95% CI, both in raw score units",
+       x = "Estimated score difference", y = NULL) +
+  theme_minimal()
+
+# ---- 9.3 Effect size comparison bar chart ----
+ggplot(wilcoxon_comparison, aes(x = method, y = effect_size_rank_biserial, fill = method)) +
+  geom_col(width = 0.5) +
+  geom_hline(yintercept = 0, color = "grey50") +
+  labs(title = "Effect size comparison (rank-biserial correlation)",
+       subtitle = "Larger magnitude = stronger association, independent of sample size",
+       x = NULL, y = "Rank-biserial r", fill = NULL) +
+  theme_minimal() + theme(legend.position = "none")
+
+# ---- 9.4 Regression coefficient table (separate — different scale/units) ----
+regression_table <- tibble(
+  term = coef_of_interest,
+  estimate = fixef(rq3_model)[coef_of_interest],
+  conf_low = rq3_ci[coef_of_interest, 1],
+  conf_high = rq3_ci[coef_of_interest, 2],
+  p_value = summary(rq3_model)$coefficients[coef_of_interest, "Pr(>|t|)"]
+) %>%
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+regression_table
+
+# ---- 9.5 One combined narrative table: does the direction agree across ALL methods? ----
+triangulation_table <- tibble(
+  method = c("Unpaired Wilcoxon (full sample)",
+             "Paired Wilcoxon (matched pairs)",
+             "Mixed regression (full sample, controlled)"),
+  n = c(nrow(data), nrow(paired_wide), nrow(data)),
+  direction = c(
+    if_else(wt_unpaired$estimate > 0, "Sarcastic higher", "Sarcastic lower"),
+    if_else(wt_paired$estimate > 0, "Sarcastic higher", "Sarcastic lower"),
+    if_else(fixef(rq3_model)["label"] > 0, "Sarcastic higher", "Sarcastic lower")
+  ),
+  p_value = c(wt_unpaired$p.value, wt_paired$p.value,
+              summary(rq3_model)$coefficients["label", "Pr(>|t|)"]),
+  significant_at_05 = p_value < 0.05
+)
+
+triangulation_table
+
+# ============================================================
+# STEP 10 — VISUALIZE THE REGRESSION (diagnostics + full effect structure)
+# ============================================================
+
+# ---- 10.1 Residuals vs. fitted — checks homoscedasticity ----
+# A random, even scatter around zero is good. A funnel/fan shape would mean
+# the signed-log transform didn't fully tame the variance structure.
+diag_data <- tibble(fitted = fitted(rq3_model), resid = resid(rq3_model))
+
+ggplot(diag_data, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.05) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(se = FALSE, color = "steelblue") +
+  labs(title = "Residuals vs. fitted values",
+       subtitle = "Even scatter around zero = homoscedasticity assumption holds reasonably well",
+       x = "Fitted value", y = "Residual") +
+  theme_minimal()
+
+# ---- 10.2 QQ plot — checks residual normality ----
+# Points following the diagonal = residuals are approximately normal.
+# Some tail deviation is expected/tolerable; a strong S-curve is not.
+ggplot(diag_data, aes(sample = resid)) +
+  stat_qq(alpha = 0.2) +
+  stat_qq_line(color = "red") +
+  labs(title = "Q-Q plot of regression residuals",
+       subtitle = "Points on the red line = normally distributed residuals") +
+  theme_minimal()
+
+# ---- 10.3 Random effect (author) distribution ----
+# Most authors are singleton "deleted_*" placeholders (Step 3.3) whose
+# random-effect estimates will shrink close to zero — a caterpillar plot
+# of ALL authors would be unreadable. Instead: the overall spread (how much
+# does author-level tendency vary?) plus the most extreme real authors.
+author_effects <- ranef(rq3_model)$author %>%
+  tibble::rownames_to_column("author") %>%
+  rename(effect = `(Intercept)`)
+
+ggplot(author_effects, aes(x = effect)) +
+  geom_histogram(bins = 60, fill = "purple", alpha = 0.7) +
+  labs(title = "Distribution of author-level random effects",
+       subtitle = paste0("SD = ", round(sd(author_effects$effect), 3),
+                         " — how much authors vary beyond what label/length/subreddit/time explain"),
+       x = "Author random intercept (signed-log score units)", y = "Number of authors") +
+  theme_minimal()
+
+# Top 15 most extreme REAL authors (excludes single-comment "deleted_*" IDs,
+# which have too little data per author to interpret individually)
+top_authors <- author_effects %>%
+  filter(!str_detect(author, "^deleted_")) %>%
+  mutate(abs_effect = abs(effect)) %>%
+  arrange(desc(abs_effect)) %>%
+  slice_head(n = 15)
+
+ggplot(top_authors, aes(x = effect, y = fct_reorder(author, effect))) +
+  geom_point(color = "purple", size = 2) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(title = "15 most extreme author-level effects (excluding deleted accounts)",
+       x = "Random intercept (signed-log score units)", y = NULL) +
+  theme_minimal()
+
+# ---- 10.4 Subreddit fixed effects — which communities score higher/lower ----
+subreddit_coefs <- summary(rq3_model)$coefficients
+subreddit_terms <- rownames(subreddit_coefs)[str_detect(rownames(subreddit_coefs), "^subreddit_pooled")]
+
+subreddit_forest <- tibble(
+  subreddit = str_remove(subreddit_terms, "^subreddit_pooled"),
+  estimate = subreddit_coefs[subreddit_terms, "Estimate"]
+) %>%
+  arrange(estimate)
+
+ggplot(subreddit_forest, aes(x = estimate, y = fct_reorder(subreddit, estimate))) +
+  geom_point(color = "darkgreen") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  labs(title = "Subreddit fixed effects (relative to reference subreddit)",
+       subtitle = "Higher = that subreddit's comments score higher on average, controlling for everything else",
+       x = "Estimate (signed-log score units)", y = NULL) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 7))
+
+# ---- 10.5 Predicted vs. observed — overall model fit check ----
+fit_check <- tibble(observed = data$score_transformed, predicted = fitted(rq3_model))
+fit_sample <- fit_check %>% slice_sample(n = min(20000, nrow(fit_check)))
+
+ggplot(fit_sample, aes(x = predicted, y = observed)) +
+  geom_point(alpha = 0.05) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Predicted vs. observed score (signed-log scale)",
+       subtitle = "Points on the red line = perfect prediction. Spread reflects unexplained variance.",
+       x = "Model-predicted score", y = "Observed score") +
+  theme_minimal()
+
+# ============================================================
+# SUMMARY — pulling all pieces of evidence together
+# ============================================================
+cat("\n=== RQ3 Summary ===\n")
+cat("\nUnpaired Wilcoxon (full sample):\n")
+print(wt_unpaired)
+cat("Effect size (rank-biserial):", round(r_rb_unpaired, 3), "\n")
+
+cat("\nPaired Wilcoxon signed-rank (matched pairs, n =", nrow(paired_wide), "pairs):\n")
+print(wt_paired)
+cat("Median paired difference:", median(paired_wide$diff), "\n")
+
+cat("\nFull-sample mixed regression (controls: length, subreddit, time, author):\n")
+print(summary(rq3_model)$coefficients["label", ])
