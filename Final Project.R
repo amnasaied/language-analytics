@@ -1747,12 +1747,18 @@ ggplot(data_sample, aes(x = comment_len, y = score_transformed,
 # and CI in the SAME raw score units, so unpaired and paired are directly
 # comparable here — unlike the regression, which is on a signed-log scale.
 
+# wilcox.test(score ~ label) reports the location shift as NON-sarcastic minus
+# sarcastic (R uses the first factor level, "0", as x). Negate the unpaired
+# estimate + CI so BOTH rows share the same "sarcastic - non-sarcastic"
+# convention as the plot title and the paired test. (The HL estimate is ~0 here
+# regardless: Reddit scores are heavily tied integers, so it degenerates —
+# direction is judged from the rank-biserial effect size, not this estimate.)
 wilcoxon_comparison <- tibble(
   method = c("Unpaired (rank-sum)", "Paired (signed-rank)"),
   n = c(nrow(data), nrow(paired_wide)),
-  estimate = c(wt_unpaired$estimate, wt_paired$estimate),
-  conf_low = c(wt_unpaired$conf.int[1], wt_paired$conf.int[1]),
-  conf_high = c(wt_unpaired$conf.int[2], wt_paired$conf.int[2]),
+  estimate = c(-wt_unpaired$estimate, wt_paired$estimate),
+  conf_low = c(-wt_unpaired$conf.int[2], wt_paired$conf.int[1]),
+  conf_high = c(-wt_unpaired$conf.int[1], wt_paired$conf.int[2]),
   p_value = c(wt_unpaired$p.value, wt_paired$p.value),
   effect_size_rank_biserial = c(r_rb_unpaired, NA)   # paired effect size added below
 )
@@ -1798,16 +1804,27 @@ regression_table <- tibble(
 regression_table
 
 # ---- 9.5 One combined narrative table: does the direction agree across ALL methods? ----
+# Direction convention: "Sarcastic higher" = sarcastic comments score above
+# non-sarcastic. The UNPAIRED direction is read from the rank-biserial effect
+# size (positive = sarcastic higher), NOT wt_unpaired$estimate — the latter is
+# (a) on R's reversed non-sarcastic-minus-sarcastic scale and (b) numerically
+# ~0 because scores are heavily tied, so its sign is unreliable. The paired
+# estimate and the regression coefficient are already on the sarcastic-vs-non
+# convention, so those two are read directly.
+# effect_size is reported alongside p: at n~41k a p-value is "significant" for
+# a trivial difference, so the effect size (rank-biserial; NA for regression,
+# which is on a different scale) is what actually gauges magnitude.
 triangulation_table <- tibble(
   method = c("Unpaired Wilcoxon (full sample)",
              "Paired Wilcoxon (matched pairs)",
              "Mixed regression (full sample, controlled)"),
   n = c(nrow(data), nrow(paired_wide), nrow(data)),
   direction = c(
-    if_else(wt_unpaired$estimate > 0, "Sarcastic higher", "Sarcastic lower"),
+    if_else(r_rb_unpaired > 0, "Sarcastic higher", "Sarcastic lower"),
     if_else(wt_paired$estimate > 0, "Sarcastic higher", "Sarcastic lower"),
     if_else(fixef(rq3_model)["label"] > 0, "Sarcastic higher", "Sarcastic lower")
   ),
+  effect_size = c(round(r_rb_unpaired, 3), round(r_rb_paired, 3), NA),
   p_value = c(wt_unpaired$p.value, wt_paired$p.value,
               summary(rq3_model)$coefficients["label", "Pr(>|t|)"]),
   significant_at_05 = p_value < 0.05
