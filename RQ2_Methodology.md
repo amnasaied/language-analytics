@@ -71,20 +71,20 @@ On the held-out test set: **accuracy, precision, recall, F1, and AUC**. AUC (thr
 
 | Model | Accuracy | Precision | Recall | F1 | AUC |
 |-------|:--------:|:---------:|:------:|:--:|:---:|
-| XGBoost: embeddings + features | 0.665 | 0.673 | 0.723 | 0.697 | 0.727 |
-| **Model 2: embeddings + features** | 0.670 | 0.682 | 0.712 | **0.697** | **0.731** |
-| Model 1: embeddings only | 0.661 | 0.672 | 0.710 | 0.690 | 0.716 |
-| XGBoost: embeddings only | 0.645 | 0.655 | 0.705 | 0.679 | 0.693 |
-| Features only (RQ1 baseline) | 0.573 | 0.584 | 0.687 | 0.632 | 0.602 |
+| **Model 2: embeddings + features** | 0.676 | 0.672 | 0.702 | **0.687** | **0.739** |
+| XGBoost: embeddings + features | 0.671 | 0.666 | 0.702 | 0.684 | 0.732 |
+| Model 1: embeddings only | 0.670 | 0.664 | 0.704 | 0.683 | 0.725 |
+| XGBoost: embeddings only | 0.638 | 0.636 | 0.669 | 0.652 | 0.701 |
+| Features only (RQ1 baseline) | 0.585 | 0.583 | 0.636 | 0.608 | 0.618 |
 
-**Significance (McNemar):** Model 1 vs Model 2 **p = 0.0006**; both embedding models vs features-only **p < 0.001**.
+**Significance (McNemar):** Model 1 vs Model 2 **p = 0.023**; both embedding models vs features-only **p < 0.001** (p ≈ 1e-40 and 7e-50).
 
-**Cross-split robustness (10 splits):** Model 2 F1 = 0.696 ± 0.005, Model 1 F1 = 0.692 ± 0.004; **Model 2 wins 10/10 splits**, mean ΔF1 = **+0.004 ± 0.002**, ΔAUC = **+0.012**.
+**Cross-split robustness (10 splits):** Model 2 F1 = 0.685 ± 0.003, Model 1 F1 = 0.682 ± 0.003; **Model 2 wins 9/10 splits**, mean ΔF1 = **+0.003 ± 0.003**, ΔAUC = **+0.011**.
 
 **Key findings**
 
-1. **Adding features improves detection — small but robust.** Model 2 beats Model 1 by a modest margin, but the gain is **statistically significant** (McNemar p = 0.0006) and **consistent across every split** (10/10 win-rate, low variance) — not one-split noise.
-2. **Embeddings carry the bulk of the signal.** Features-only reaches only AUC 0.60 (near chance), embeddings-only 0.72 — so contextual semantics dominate; psycholinguistic features add a small increment on top.
+1. **Adding features improves detection — small but robust.** Model 2 beats Model 1 by a modest margin, but the gain is **statistically significant** (McNemar p = 0.023) and **consistent across nearly every split** (9/10 win-rate, low variance) — not one-split noise.
+2. **Embeddings carry the bulk of the signal.** Features-only reaches only AUC 0.62 (near chance), embeddings-only 0.72 — so contextual semantics dominate; psycholinguistic features add a small increment on top.
 3. **The pattern is model-agnostic.** Both ridge and XGBoost show embeddings + features > embeddings only.
 4. **Consistent with RQ1 and SARC:** hand-crafted features are individually weak but real, and semantics/context dominate sarcasm detection.
 
@@ -94,9 +94,9 @@ On the held-out test set: **accuracy, precision, recall, F1, and AUC**. AUC (thr
 
 ## Limitations
 
-- **Small absolute gain:** features add ≈ +0.004 F1 / +0.012 AUC — reliable but modest; embeddings do the heavy lifting.
+- **Small absolute gain:** features add ≈ +0.003 F1 / +0.011 AUC — reliable but modest; embeddings do the heavy lifting.
 - **Frozen embeddings + light classifier** (by design, to isolate the feature contribution) — not end-to-end fine-tuning, so absolute performance is not state-of-the-art.
-- **Modest ceiling overall** (best AUC ≈ 0.73) — expected; sarcasm is hard (SARC: bag-of-n-grams ≈ 76%, humans ≈ 82%).
+- **Modest ceiling overall** (best AUC ≈ 0.74) — expected; sarcasm is hard (SARC: bag-of-n-grams ≈ 76%, humans ≈ 82%).
 - **Baseline estimator differs** (features-only uses plain logistic vs ridge for the embedding models) — a minor confound in that one comparison.
 - **Truncation:** embeddings cap input at 256 tokens, so the longest comments are truncated.
 

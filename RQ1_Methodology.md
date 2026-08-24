@@ -5,9 +5,9 @@ output:
 ---
 # RQ1 — What features distinguish sarcastic from non-sarcastic comments?
 
-**Design:** confirmatory / inferential. We test *theory-derived* linguistic features against a pre-specified directional hypothesis each, and report **effect sizes** (not just p-values) because at ~41k observations almost everything is "significant."
+**Design:** confirmatory / inferential. We test *theory-derived* linguistic features against a pre-specified directional hypothesis each, and report **effect sizes** (not just p-values) because at ~51k observations almost everything is "significant."
 
-**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (41,077 comments, ~50/50 balanced).** The multivariate model (Step 4) additionally controls for subreddit as a fixed effect — the top-30 subreddits individually, the remainder pooled into an `"Other"` level for estimation stability — still on the full corpus.
+**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (51,299 comments, 49/51 balanced).** The multivariate model (Step 4) additionally controls for subreddit as a fixed effect — the top-30 subreddits individually, the remainder pooled into an `"Other"` level for estimation stability — still on the full corpus.
 
 ---
 
@@ -110,14 +110,14 @@ Each hypothesis gets a directional verdict — **Confirmed / Reversed / Not supp
 | Feature | Observed | Effect (V) | OR / SD | Verdict | Strength |
 |---------|----------|-----------|---------|---------|----------|
 | **Exclamation** | ↑ sarcastic | 0.133 | 1.33 | **Confirmed** | moderate |
-| **Emoticons** | ↑ non-sarcastic | 0.082 | 0.83 | **Confirmed** | small |
+| **Emoticons** | ↑ non-sarcastic | 0.083 | 0.83 | **Confirmed** | small |
 | **Interjections** | ↑ sarcastic | 0.052 | 1.11 | **Confirmed** | small |
-| Intensifiers | ↑ sarcastic | 0.030 | 1.05 | Confirmed | negligible |
-| Laughter | ↑ non-sarcastic | 0.030 | 0.95 | Confirmed | negligible |
-| Capitalization | ↑ sarcastic | 0.013 | 1.06 | Confirmed | negligible |
-| Sentiment incongruity | ↑ sarcastic | 0.012 | 1.03 | Confirmed | negligible |
-| Quotation marks | ↑ (univ.) / ↓ (multi.) | 0.017 | 0.97 | **Mixed** | negligible |
-| Ellipsis | — | ~0 | 1.00 | **Not supported** | negligible |
+| Intensifiers | ↑ sarcastic | 0.035 | 1.06 | Confirmed | negligible |
+| Laughter | ↑ non-sarcastic | 0.033 | 0.95 | Confirmed | negligible |
+| Sentiment incongruity | ↑ sarcastic | 0.018 | 1.04 | Confirmed | negligible |
+| Quotation marks | ↑ (univ.) / ↓ (multi.) | 0.015 | 0.97 | **Mixed** | negligible |
+| Capitalization | ↑ sarcastic | 0.009 | 1.06 | Confirmed | negligible |
+| Ellipsis | ↑ sarcastic (ns) | 0.007 | 1.02 | **Not supported** | negligible |
 
 **Key findings**
 
@@ -132,8 +132,8 @@ Each hypothesis gets a directional verdict — **Confirmed / Reversed / Not supp
 
 ## Limitations
 
-- **Non-independence:** ~25.7k authors across the corpus (plus shared threads), so main-model standard errors are mildly anti-conservative; Part 5 addresses thread-level clustering.
-- **Paired model underpowered:** the within-thread matched sample is small, so it does not independently confirm effects (a power issue, not a disconfirmation).
+- **Non-independence:** ~29.2k authors across the corpus (plus shared threads), so main-model standard errors are mildly anti-conservative; Part 5 addresses thread-level clustering.
+- **Paired model underpowered:** the within-thread matched sample is small (252 matched pairs / 504 comments) — only exclamation reaches nominal significance and nothing survives FDR, so it does not independently confirm effects (a power issue, not a disconfirmation).
 - **Large N inflates significance** — hence effect size, not p-value, is our evidence throughout.
 - **Subreddit scope:** univariate tests and the synthesis use the full cleaned corpus; the multivariate model restricts subreddit fixed effects to the top-30 by volume for estimation stability.
 - **Lexicon coverage:** interjection/intensifier/emoticon lists are finite dictionaries, so novel or misspelled variants are missed.

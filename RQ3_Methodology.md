@@ -7,7 +7,7 @@ output:
 
 **Design:** confirmatory / inferential. The question is *directional and comparative*, so we test it with **three methods that fail in different ways** and check whether their direction agrees (triangulation). Because n ≈ 41k makes almost anything "significant," the evidence is judged on **effect size and robustness to controls**, not p-values alone.
 
-**Data:** the cleaned SARC corpus already carrying the RQ1 features (comment length, etc.) plus the raw SARC columns `score`, `created_utc`, `author`, `subreddit`, `parent_comment`, `label`. After RQ3-specific cleaning: **41,077 comments** (19,278 non-sarcastic / 21,799 sarcastic), across the subreddits that survived filtering. "Public approval" is operationalized as Reddit `score` (net upvotes).
+**Data:** the cleaned SARC corpus already carrying the RQ1 features (comment length, etc.) plus the raw SARC columns `score`, `created_utc`, `author`, `subreddit`, `parent_comment`, `label`. After RQ3-specific cleaning: **51,299 comments** (24,945 non-sarcastic / 26,354 sarcastic), across 62 subreddits. "Public approval" is operationalized as Reddit `score` (net upvotes).
 
 ---
 
@@ -66,32 +66,32 @@ Paired scatter, within-pair difference histogram, bootstrap distribution, coeffi
 
 ## Results
 
-**Descriptive:** median score 1 (non-sarcastic) vs 2 (sarcastic); IQR 2 vs 3.
+**Descriptive:** median score 1 (non-sarcastic) vs 2 (sarcastic); IQR 2 vs 4.
 
 **Triangulation across methods:**
 
 | Method | n | Direction | Effect size | p-value | Significant (.05) |
 |--------|:--:|-----------|:-----------:|:-------:|:-----------------:|
-| Unpaired Wilcoxon (full sample) | 41,077 | Sarcastic higher | 0.017 (rank-biserial) | 0.002 | Yes |
-| Paired Wilcoxon (matched pairs) | 237 | Sarcastic higher | 0.102 (rank-biserial) | 0.115 | No |
-| Mixed regression (controlled) | 41,077 | Sarcastic lower | — (signed-log) | 0.678 | No |
+| Unpaired Wilcoxon (full sample) | 51,299 | Sarcastic higher | 0.033 (rank-biserial) | 2.8e-11 | Yes |
+| Paired Wilcoxon (matched pairs) | 252 | Sarcastic higher | 0.116 (rank-biserial) | 0.066 | No |
+| Mixed regression (controlled) | 51,299 | Sarcastic higher | — (signed-log) | 0.115 | No |
 
-Supporting detail: paired pseudo-median difference ≈ 0.50 but **bootstrap 95% CI = (0, 0)** and median paired difference = 0; regression `label` coefficient = **−0.005** (SE 0.011, p = 0.68). Controls behave sensibly (`comment_len` and `time_scaled` both p < 0.001; author random-effect SD ≈ 0.25).
+Supporting detail: paired pseudo-median difference ≈ 0.50 but **bootstrap 95% CI = (0, 0)** and median paired difference = 0; regression `label` coefficient = **+0.016** (SE 0.010, p = 0.12). Controls behave sensibly (`comment_len` and `time_scaled` both p < 0.001; author random-effect SD ≈ 0.24).
 
 **Key findings**
 
-1. **No robust "higher approval" effect.** The only "significant" result (unpaired) has a **negligible effect size (r = 0.017)** — significant purely because n ≈ 41k. This is exactly the large-N trap the effect-size-first design guards against.
-2. **The within-thread test does not confirm it.** The paired test points the same (higher) direction but is **not significant** (p = 0.12) and is **underpowered** — only 237 matched pairs, with a median pairwise difference of 0.
-3. **It vanishes — even reverses slightly — under controls.** Once subreddit, length, posting time, and author are adjusted for, the sarcasm coefficient is **essentially zero and non-significant** (−0.005, p = 0.68).
+1. **All three methods lean the same way, but the effect is negligible.** Every method points toward sarcastic scoring slightly higher, yet the only **statistically significant** result (unpaired) has a **negligible effect size (r = 0.033)** — significant purely because n ≈ 51k. This is exactly the large-N trap the effect-size-first design guards against.
+2. **The within-thread test does not confirm it.** The paired test points the same (higher) direction but is **not significant** (p = 0.066, only borderline) and is **underpowered** — only 252 matched pairs, with a median pairwise difference of 0.
+3. **It does not survive controls.** Once subreddit, length, posting time, and author are adjusted for, the sarcasm coefficient is **small, positive, and non-significant** (+0.016, p = 0.12) — a directional hint, not a reliable effect.
 
-**One-line answer:** *No — there is no robust evidence that sarcastic comments receive higher scores. A negligible raw tendency toward higher scores is not confirmed within threads and disappears once subreddit, length, time, and author are controlled for.*
+**One-line answer:** *No — there is no statistically reliable evidence that sarcastic comments receive meaningfully higher scores. All three methods lean slightly toward "higher", but the only significant result has a negligible effect size, the within-thread test is non-significant, and the controlled estimate is positive but not significant.*
 
 ---
 
 ## Limitations
 
 - **"Approval" ≠ score.** Reddit `score` reflects visibility, timing, and virality as much as genuine approval; it is a proxy, not a direct measure. (The sibling data-quality check also found `downs` uninformative and `ups` largely redundant with `score`.)
-- **Paired test underpowered.** Only 237 parents had exactly one sarcastic + one non-sarcastic reply, so the cleanest comparison has limited power — a non-result here is a power issue, not disconfirmation.
+- **Paired test underpowered.** Only 252 parents had exactly one sarcastic + one non-sarcastic reply, so the cleanest comparison has limited power — the borderline non-result (p = 0.066) here is a power issue, not disconfirmation.
 - **Tied discrete scores.** Integer, heavily-tied scores make the Hodges–Lehmann location estimate degenerate; direction is therefore judged from effect size / medians, and magnitudes should be read from effect sizes rather than the location shift.
 - **Large N inflates significance** — hence effect size and robustness-to-controls, not p-values, drive the verdict.
 - **Non-independence** (shared threads, repeat authors) is addressed by the author random effect and the paired design, but not exhaustively.
