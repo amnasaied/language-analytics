@@ -5,9 +5,9 @@ output:
 ---
 # RQ1 — What features distinguish sarcastic from non-sarcastic comments?
 
-**Design:** confirmatory / inferential. We test *theory-derived* linguistic features against a pre-specified directional hypothesis each, and report **effect sizes** (not just p-values) because at ~45k observations almost everything is "significant."
+**Design:** confirmatory / inferential. We test *theory-derived* linguistic features against a pre-specified directional hypothesis each, and report **effect sizes** (not just p-values) because at ~41k observations almost everything is "significant."
 
-**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (~50k comments, ~50/50 balanced).** The multivariate model (Step 4) additionally controls for subreddit as a fixed effect — the top-30 subreddits individually, the remainder pooled into an `"Other"` level for estimation stability — still on the full corpus.
+**Data:** the SARC "balanced" Reddit sarcasm export (Khodak et al. 2018), 50/50 sarcastic/non-sarcastic, filtered to ~62 marketing-relevant subreddits (phones, cars, fashion, gaming, retail, entertainment) so findings speak to marketing UGC. **All RQ1 analyses run on the full cleaned corpus (41,077 comments, ~50/50 balanced).** The multivariate model (Step 4) additionally controls for subreddit as a fixed effect — the top-30 subreddits individually, the remainder pooled into an `"Other"` level for estimation stability — still on the full corpus.
 
 ---
 
