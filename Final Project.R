@@ -286,6 +286,9 @@ data <- data %>% mutate(log_length = log1p(comment_len))
 # ---- Feature 3: VADER sentiment (whole comment + parent, for feature 4) ----
 # NOTE: score each UNIQUE text once, then join back — many rows share the
 # same parent_comment, so scoring every row separately repeats work.
+# Guard: drop any pre-existing vader_* columns so re-running this block in the
+# same session can't create duplicate .x/.y suffixed columns from the joins.
+data <- data %>% select(-matches("^vader_(comment|parent)($|\\.)"))
 unique_comments <- tibble(comment = unique(data$comment)) %>%
   mutate(vader_comment = sapply(comment, function(x)
     tryCatch(get_vader(x)["compound"], error = function(e) NA_real_)) %>% as.numeric())
@@ -1599,8 +1602,10 @@ data <- data %>%
 top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
 data <- data %>% mutate(subreddit_pooled = if_else(subreddit %in% top_subs, subreddit, "Other"))
 
+data <- data %>% mutate(comment_len_z = as.numeric(scale(comment_len)))
+
 rq3_model <- lmer(
-  score_transformed ~ label + comment_len + subreddit_pooled + time_scaled + (1 | author),
+  score_transformed ~ label + comment_len_z + subreddit_pooled + time_scaled + (1 | author),
   data = data
 )
 
@@ -1619,12 +1624,12 @@ rq3_ci <- confint(rq3_model, parm = "beta_", method = "Wald")
 # report, so it should be the default unless the data clearly needs more.
 
 rq3_model_quad_len <- lmer(
-  score_transformed ~ label + poly(comment_len, 2) + subreddit_pooled + time_scaled + (1 | author),
+  score_transformed ~ label + poly(comment_len_z, 2) + subreddit_pooled + time_scaled + (1 | author),
   data = data
 )
 
 rq3_model_quad_time <- lmer(
-  score_transformed ~ label + comment_len + subreddit_pooled + poly(time_scaled, 2) + (1 | author),
+  score_transformed ~ label + comment_len_z + subreddit_pooled + poly(time_scaled, 2) + (1 | author),
   data = data
 )
 
@@ -1693,7 +1698,7 @@ ggplot(tibble(boot_median = boot_out$t[, 1]), aes(x = boot_median)) +
 # ---- 8.4 Regression coefficient forest plot ----
 # Visualizes the fixed effects of interest (excluding the many subreddit
 # dummies, which would clutter the plot) with their confidence intervals.
-coef_of_interest <- c("label", "comment_len", "time_scaled")
+coef_of_interest <- c("label", "comment_len_z", "time_scaled")
 
 forest_data <- tibble(
   term = coef_of_interest,
