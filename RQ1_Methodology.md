@@ -22,9 +22,8 @@ Each step exists to answer a question the previous one leaves open:
 | 2. Engineer features | *How do we measure them?* | Converts text → numeric features |
 | 3. Univariate tests | *Does each feature differ between classes?* | First evidence, per feature |
 | 4. Multivariate model | *Does it still hold with others + confounds controlled?* | Rules out topic/length confounds |
-| 5. Paired robustness | *Does it hold within the same thread?* | Strictest confound control |
-| 6. Ranking | *Which features matter most?* | Orders the confirmed effects |
-| 7. Synthesis | *What is the verdict per hypothesis?* | The actual answer to RQ1 |
+| 5. Ranking | *Which features matter most?* | Orders the confirmed effects |
+| 6. Synthesis | *What is the verdict per hypothesis?* | The actual answer to RQ1 |
 
 ---
 
@@ -89,17 +88,11 @@ Both tables are **FDR-corrected** (Benjamini–Hochberg) to control false positi
 
 *Specification:* `logit P(sarcastic) = β₀ + Σₖ βₖ·featureₖ + β_len·log_length + subreddit fixed effects`.
 
-## Step 5 — Paired robustness check
-
-*Why:* subreddit control is still coarse. We refit as a **conditional (fixed-effects) logistic regression** stratified by `parent_comment` — comparing a sarcastic and a non-sarcastic reply **to the same parent**. This cancels all shared context (topic, thread) and mirrors the SARC benchmark design. Only parents with exactly one sarcastic + one non-sarcastic reply enter this model.
-
-*Specification:* `logit P(sarcastic) = Σₖ βₖ·featureₖ + β_len·log_length`, stratified by parent (no global intercept).
-
-## Step 6 — Rank features (inferential)
+## Step 5 — Rank features (inferential)
 
 Features ranked by **standardized odds ratio + FDR-adjusted significance**. Predictive rankings (random-forest importance, AUC) were deliberately removed — predictive performance is RQ2's job, not RQ1's.
 
-## Step 7 — Synthesis verdict
+## Step 6 — Synthesis verdict
 
 Each hypothesis gets a directional verdict — **Confirmed / Reversed / Not supported / Mixed** — with a separate **strength** label (effect-size magnitude), so a statistically-significant-but-tiny effect is not oversold.
 
@@ -132,8 +125,7 @@ Each hypothesis gets a directional verdict — **Confirmed / Reversed / Not supp
 
 ## Limitations
 
-- **Non-independence:** ~29.2k authors across the corpus (plus shared threads), so main-model standard errors are mildly anti-conservative; Part 5 addresses thread-level clustering.
-- **Paired model underpowered:** the within-thread matched sample is small (252 matched pairs / 504 comments) — only exclamation reaches nominal significance and nothing survives FDR, so it does not independently confirm effects (a power issue, not a disconfirmation).
+- **Non-independence:** ~29.2k authors across the corpus (plus shared threads), so main-model standard errors are mildly anti-conservative.
 - **Large N inflates significance** — hence effect size, not p-value, is our evidence throughout.
 - **Subreddit scope:** univariate tests and the synthesis use the full cleaned corpus; the multivariate model restricts subreddit fixed effects to the top-30 by volume for estimation stability.
 - **Lexicon coverage:** interjection/intensifier/emoticon lists are finite dictionaries, so novel or misspelled variants are missed.
