@@ -142,12 +142,8 @@ data %>% select(comment, parent_comment, label) %>% slice_sample(n = 10)
 
 # ============================================================
 # RQ1: What features distinguish sarcastic from non-sarcastic comments?
-# Input: cleaned `data` object (from clean_sarcasm_data.R)
-#        must contain: comment, parent_comment, label, subreddit
-# 11 features (within-comment incongruity dropped; sentiment_flip dropped
-# as redundant with corrected abs(sentiment_diff); year dropped as a
-# control; ?!/has_qe dropped — caused a separation artifact in the
-# regression: OR 1347, non-significant p-value, AUC 0.5, zero RF importance)
+# Input: cleaned `data` — must contain: comment, parent_comment, label, subreddit
+# 11 hand-crafted features (engineered in Part 1).
 # ============================================================
 
 library(dplyr)
@@ -505,8 +501,6 @@ density_features <- c("caps_ratio","log_length","vader_comment","sentiment_diff"
 sparse_features  <- c("excl_ratio","ellipsis_ratio","interjection_ratio",
                       "emoticon_ratio","laughter_ratio","quote_ratio",
                       "intensifier_ratio")
-# has_qe dropped entirely — caused a separation artifact in the regression
-# (OR 1347, non-significant p-value, AUC 0.5, zero RF importance)
 
 # Underlying raw-count columns for sparse features, used to compute prevalence
 sparse_raw_map <- c(excl_ratio = "excl_count", ellipsis_ratio = "ellipsis_count",
@@ -633,7 +627,7 @@ data_scaled <- data %>%
 # Keep the full corpus but stabilise subreddit control: the top-30 subreddits
 # keep their own dummy; the long tail is pooled into "Other". This avoids
 # unstable tiny-subreddit dummies WITHOUT dropping any rows, so the model is
-# estimated on the same full sample as the univariate/paired analyses.
+# estimated on the same full sample as the univariate analyses.
 top_subs <- data %>% count(subreddit, sort = TRUE) %>% slice_head(n = 30) %>% pull(subreddit)
 
 main_model <- glm(
@@ -787,7 +781,7 @@ library(MASS)
 
 # NOTE: MASS defines its own select() which silently overrides dplyr::select()
 # for the REST OF THIS R SESSION, not just this script — if you later re-run
-# an earlier script (e.g. clean_sarcasm_data.R) in the same session, its
+# an earlier chunk in the same session, its
 # plain select() calls will break too with an "unused arguments" error.
 # Restoring dplyr's version here prevents that regardless of run order.
 select <- dplyr::select
@@ -861,7 +855,6 @@ summary(pca_result)$importance[2, 1:2]
 # + RQ1's own model refit on the same split, for a 3-way comparison
 #
 # Input: `data` object already carrying the 11 RQ1 features
-#        (i.e., run rq1_full_pipeline.R Parts 0-1 first)
 # ============================================================
 
 library(dplyr)
@@ -957,8 +950,6 @@ test_idx  <- which(data$split == "test")
 feat_names <- c("caps_count","excl_count","ellipsis_count","interjection_count",
                 "emoticon_count","laughter_count","quote_count",
                 "intensifier_count","vader_comment","sentiment_diff","log_length")
-# has_qe excluded — caused a separation artifact in RQ1's regression
-# (OR 1347, non-significant p-value, AUC 0.5, zero RF importance)
 
 # Scale hand-crafted features using TRAIN statistics only — applying test-set
 # means/SDs would leak test-set information into the "standardization"
@@ -1015,7 +1006,7 @@ model2_pred_prob <- predict(model2, newx = X_combined_test, s = "lambda.min", ty
 # ============================================================
 # PART 6 — REFIT THE RQ1 MODEL ON THE SAME SPLIT (for fair comparison)
 # ============================================================
-# Same formula as RQ1 (12 features + subreddit fixed effects), just fit on
+# Same formula as RQ1 (11 features + subreddit fixed effects), just fit on
 # the training portion only and evaluated on the held-out test set — RQ1's
 # original fit used the full dataset for inference, which isn't a fair
 # comparison point until it's evaluated out-of-sample like the others.
@@ -1395,7 +1386,7 @@ quantile(data$score, probs = c(.001, .01, .05, .25, .5, .75, .95, .99, .999))
 
 # ---- 1.5 Duplicate check specific to score-bearing rows ----
 # Full comment-level duplicates were already removed during initial
-# cleaning (clean_sarcasm_data.R) — this just confirms that held for the
+# cleaning — this just confirms that held for the
 # rows going into RQ3 specifically, in case `data` has been re-filtered
 # since then (e.g., by RQ1's feature-engineering steps).
 nrow(data) - n_distinct(data$comment, data$parent_comment)
@@ -1942,3 +1933,8 @@ cat("Median paired difference:", median(paired_wide$diff), "\n")
 
 cat("\nFull-sample mixed regression (controls: length, subreddit, time, author):\n")
 print(summary(rq3_model)$coefficients["label", ])
+
+source("save_plots.R") 
+
+
+
